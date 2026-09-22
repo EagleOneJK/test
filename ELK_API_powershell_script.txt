@@ -1,0 +1,362 @@
+function Get-ElkRecords{
+    param(
+        [pscredential]$ElkCredential,
+        [switch]$ElkCredentialIsAPIkey,
+        [string]$ElkIndex="winlogbeat*",
+        [string]$ElkQuery="*",
+        [Parameter(ParameterSetName = 'Days')] [Int32]$NumDaysAgoStart=1,
+        [Parameter(ParameterSetName = 'Days')] [Int32]$NumDaysAgoEnd=0,
+        [Parameter(ParameterSetName = 'Minutes')] [Int32]$NumMinutesAgoStart,
+        [Parameter(ParameterSetName = 'Mintues')] [Int32]$NumMinutesAgoEnd,
+        [Parameter(ParameterSetName = 'Hours')] [Int32]$NumHoursAgoStart,
+        [Parameter(ParameterSetName = 'Hours')] [Int32]$NumHoursAgoEnd,
+        [Parameter(ParameterSetName = 'Absolute')] [datetime]$startTime,
+        [Parameter(ParameterSetName = 'Absolute')] [datetime]$endTime,
+        [string]$ElkRestURI="https://elasticsearch.lan:9200",
+        [int]$RecordCount=10000,
+        [bool]$AnalyzeWildcards = $true,
+        [string]$TimeField="@timestamp",
+        [string]$SortField="@timestamp",
+        [ValidateSet("asc","desc")][string]$SortOrder="desc",
+        [switch]$NoTimeField,
+        [switch]$ExcludeSource,
+        [string]$BucketField,
+        [ValidateSet("terms","date_histogram","cardinality")][string]$BucketType="terms",
+        [int32]$BucketSize=500,
+        [int32]$BucketMinDocCount=1,
+        [string]$BucketInterval="1d",
+        [string]$SubBucketField,
+        [ValidateSet("terms","date_histogram","cardinality")][string]$SubBucketType="terms",
+        [int32]$SubBucketSize=50,
+        [int32]$SubBucketMinDocCount=1,
+        [string]$SubBucketInterval="1d",
+        [string]$SubSubBucketField,
+        [ValidateSet("terms","date_histogram","cardinality")][string]$SubSubBucketType="terms",
+        [int32]$SubSubBucketSize=5,
+        [int32]$SubSubBucketMinDocCount=1,
+        [string]$SubSubBucketInterval="1d",
+        [switch]$DebugRequest
+
+    )
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIkey){
+        $authHeader = "ApiKey $base64AuthInfo"
+    }else{
+        $authHeader = "Basic $base64AuthInfo"
+    }
+    
+    $headers = @{authorization=$authHeader;"content-type"="application/json"}
+
+    if($startTime -or $endTime){
+        if(!$endTime){$endTime = Get-Date}
+        if(($startTime -gt $dstStart) -and ($startTime -lt $dstEnd)){$startTZD = $tzdiffDST}
+        if(($endTime -gt $dstStart) -and ($endTime -lt $dstEnd)){$endTZD = $tzdiffDST}
+        [string]$start = $startTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+        [string]$end = $endTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+    }elseif($numHoursAgoStart -or $numHoursAgoEnd){
+        $interval = "h"
+        if($numHoursAgoStart -ge 0){[string]$start = "now-$($numHoursAgoStart)$interval"}else{[string]$start = "now+$(0-$numHoursAgoStart)$interval"}
+        if($numHoursAgoEnd -ge 0){[string]$end = "now-$($numHoursAgoEnd)$interval"}else{[string]$end = "now+$(0-$numHoursAgoEnd)$interval"}
+    }elseif($numDaysAgoStart -or $numDaysAgoEnd){
+        $interval = "d"
+        if($numDaysAgoStart -ge 0){[string]$start = "now-$($numDaysAgoStart)$interval"}else{[string]$start = "now+$(0-$numDaysAgoStart)$interval"}
+        if($numDaysAgoEnd -ge 0){[string]$end = "now-$($numDaysAgoEnd)$interval"}else{[string]$end = "now+$(0-$numDaysAgoEnd)$interval"}
+    }else{
+        $interval = "m"
+        if($numMinutesAgoStart -ge 0){[string]$start = "now-$($numMinutesAgoStart)$interval"}else{[string]$start = "now+$(0-$numMinutesAgoStart)$interval"}
+        if($numMinutesAgoEnd -ge 0){[string]$end = "now-$($numMinutesAgoEnd)$interval"}else{[string]$end = "now+$(0-$numMinutesAgoEnd)$interval"}
+    }
+
+    $query = @{size=$RecordCount; query = @{bool = @{must = @(@{query_string = @{query = $ELKQuery; analyze_wildcard=$AnalyzeWildcards}});filter = @{range = @{$TimeField = @{gte = $start; lt = $end}}}}};sort = @{$SortField = @{order = $SortOrder}};}
+    if($NoTimeField){
+        $query = @{size=$RecordCount; query = @{bool = @{must = @(@{query_string = @{query = $ELKQuery; analyze_wildcard=$AnalyzeWildcards}})}}}
+    }
+    if($ExcludeSource){
+        $query.Add('_source',$false)
+    }
+
+    if($BucketField){
+        if($BucketType -eq "terms"){
+            $query.aggs = @{ buckets=@{$BucketType = @{"field"= $BucketField;"size"= $BucketSize; "min_doc_count" = $BucketMinDocCount; order = @{_count = "desc"}}}}
+        }elseif($BucketType -eq "date_histogram"){
+            $query.aggs = @{ buckets=@{$BucketType = @{"field"= $BucketField;"fixed_interval" = $BucketInterval;"min_doc_count"=$BucketMinDocCount}}}
+        }else{
+            $query.aggs = @{ buckets=@{$BucketType = @{"field"= $BucketField}}}
+        }
+        
+
+        if($SubBucketField){
+            if($SubBucketType -eq "terms"){
+                $query.aggs.buckets.aggs = @{ subbuckets=@{$SubBucketType = @{"field"= $SubBucketField; "size"= $SubBucketSize; "min_doc_count" = $SubBucketMinDocCount; order = @{_count = "desc"}}}}
+            }elseif($SubBucketType -eq "date_histogram"){
+                $query.aggs.buckets.aggs = @{ subbuckets=@{$SubBucketType = @{"field"= $SubBucketField;"fixed_interval" = $SubBucketInterval;"min_doc_count"=$SubBucketMinDocCount}}}
+            }else{
+                $query.aggs.buckets.aggs = @{ subbuckets=@{$SubBucketType = @{"field"= $SubBucketField; }}}
+            }
+
+            if($SubSubBucketField){
+                if($SubSubBucketType -eq "terms"){
+                    $query.aggs.buckets.aggs.subbuckets.aggs = @{ subsubbuckets=@{$SubSubBucketType = @{"field"= $SubSubBucketField; "size"= $SubSubBucketSize; "min_doc_count" = $SubSubBucketMinDocCount; order = @{_count = "desc"}}}}
+                }elseif($SubSubBucketType -eq "date_histogram"){
+                    $query.aggs.buckets.aggs.subbuckets.aggs = @{ subsubbuckets=@{$SubSubBucketType = @{"field"= $SubSubBucketField;"fixed_interval" = $SubSubBucketInterval;"min_doc_count"=$SubSubBucketMinDocCount}}}
+                }else{
+                    $query.aggs.buckets.aggs.subbuckets.aggs = @{ subsubbuckets=@{$SubSubBucketType = @{"field"= $SubSubBucketField}}}
+                }
+
+            }
+
+        }
+
+    }
+
+$code= @"
+        using System.Net;
+        using System.Security.Cryptography.X509Certificates;
+        public class TrustAllCertsPolicy : ICertificatePolicy {
+            public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem) {
+                return true;
+            }
+        }
+"@
+if([system.type]::GetType("TrustAllCertsPolicy") -eq $bull){Add-Type -TypeDefinition $code -Language CSharp}
+[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+
+#   $query = @{query=@{query_string=@{query="user.name:SYSTEM"};filter=@(@{range=@{"@timestamp"=@{gte="now-90d/d";lte="now/d"}}})}}
+    $query_json = $query | ConvertTo-Json -Depth 10
+
+    if($DebugRequest){
+        Write-Host -Debug -ForegroundColor Yellow "$ElkRestURI/$ElkIndex/_search"
+        Write-Host -Debug -ForegroundColor Yellow ($headers | Out-String)
+        Write-Host -Debug -ForegroundColor Yellow $query_json
+    }
+    $r = Invoke-RestMethod -Method Post -Uri "$ElkRestURI/$ElkIndex/_search" -Body $query_json -ContentType "application/json" -Headers $headers 
+    return $r
+
+    #$r3 = Get-ElkRecords -ElkCredential $cred -ElkRestURI "https://elasticsearch.lan:9200" -ElkIndex "winlogbeat*" -NumDaysAgoStart 365 -BucketField "host.name" -BucketType terms -SubBucketField "host.ip" -SubBucketType terms -RecordCount 0 -ElkQuery 'host.ip:("75.161.0.0/24" OR "75.161.19.0/24" OR "75.161.99.1/24" OR "75.161.183.0/24" OR "142.202.1.9/24" OR "142.202.25.0/24" OR "142.202.62.0/24" OR "142.202.148.1/24" OR "142.202.110.0/24" OR "142.202.100.0/24" OR "68.50.10.0/24" OR "68.50.88.0/24" OR "68.50.6.0/24" OR "75.161.148.0/24")'
+    #$list = foreach ($bucket in ($r3.aggregations.buckets.buckets | ?{$_.key -match "\."})){$myip = $bucket.subbuckets.buckets.key | ?{$_ -notmatch "^(::1|127\.0\.0\.1|10\.|169\.254\.|1\.1\.|239\.255\.|224\.0)"} | select -First 1;$item = "" | Select asset_name,asset_type_name,asset_description,asset_ip,asset_domain,asset_tags; $item.asset_name ="$($bucket.key -split '\.' | select -First 1)"; $item.asset_domain = $(($bucket.key -split '\.' | select -Last 2) -join "."); $item.asset_ip=$myip; if($item.asset_name -match "[0-9]"){$item.asset_type_name = "Windows - Computer"}else{$item.asset_type_name="Windows - Server"}; $item}
+    #$list | Sort-Object -Property asset_name | ft -AutoSize
+    #$list | ConvertTo-Csv -NoTypeInformation | Out-File -Encoding ascii -FilePath .\dfir_asset-import.csv    
+}
+
+function Add-ElkRecords{
+    param(
+        [pscredential]$ElkCredential,
+        [switch]$ElkCredentialIsAPIkey,
+        [string]$ElkIndex="powershell-records",
+        [string]$ElkRestURI="https://elasticsearch.lan:9200",
+        [Parameter(ParameterSetName = 'json')][string]$recordJson,
+        [Parameter(ParameterSetName = 'hashtable')] [hashtable]$recordHashtable,
+        [string]$TimeField="@timestamp",
+        [string]$FormatTimeField="",
+        [switch]$NoTimeField,
+        [switch]$DebugRequest
+
+    )
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIkey){
+        $authHeader = "ApiKey $base64AuthInfo"
+    }else{
+        $authHeader = "Basic $base64AuthInfo"
+    }
+    $code= @"
+        using System.Net;
+        using System.Security.Cryptography.X509Certificates;
+        public class TrustAllCertsPolicy : ICertificatePolicy {
+            public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem) {
+                return true;
+            }
+        }
+"@
+    if([system.type]::GetType("TrustAllCertsPolicy") -eq $bull){Add-Type -TypeDefinition $code -Language CSharp}
+    [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+    
+    $headers = @{authorization=$authHeader;"content-type"="application/json"}
+
+    $bodyJson = ""
+    if($recordHashtable){
+        $bodyJson = $recordHashtable | ConvertTo-Json -Depth 10
+    }else{
+        $bodyJson = $recordJson.Clone()
+    }
+
+    if($FormatTimeField){
+        $tmp = $null
+        #$tmp = Get-Date $bodyJson | ConvertFrom-Json | % 
+    }
+
+    if($DebugRequest){
+        Write-Host -Debug -ForegroundColor Yellow "$ElkRestURI/$ElkIndex/_search"
+        Write-Host -Debug -ForegroundColor Yellow ($headers | Out-String)
+        Write-Host -Debug -ForegroundColor Yellow $query_json
+    }
+    $r = Invoke-RestMethod -Method Post -Uri "$ElkRestURI/$ElkIndex/_doc" -Body $bodyJson -ContentType "application/json" -Headers $headers 
+    return $r
+}
+
+function Export-ElkHostname2IPMapping{
+    param(
+        [string]$DefendedAssetListFile="",
+        [pscredential]$ElasticCredential,
+        [string]$BucketField="host.name",
+        [string]$SubBucketField="host.ip",
+        [string]$IPExclusionRegex= "^(::1|127\.0\.0\.1|10\.|169\.254\.|1\.1\.|239\.255\.|224\.0)",
+        [string]$OutFile = ".\hostname2IP_dfir_import.csv",
+        [int]$numDaysAgoStart=365
+    )
+    if(Test-Path -LiteralPath $DefendedAssetListFile -PathType Leaf ){
+        $DAL = (gc -LiteralPath $DefendedAssetListFile ) -join '" OR "'
+    }
+    if(!$ElasticCredential){
+        $ElasticCredential = Get-Credential -Message "Provide elastic credentials. Username is likely 'elastic'"
+    }
+    $query = $('host.ip:("' + $DAL + '")') 
+    Write-Host -Debug -ForegroundColor Yellow $query
+    $ElkQuery = Get-ElkRecords -ElkCredential $cred -ElkRestURI "https://elasticsearch.lan:9200" -ElkIndex "winlogbeat*" -NumDaysAgoStart $numDaysAgoStart -BucketField $BucketField -BucketType terms -SubBucketField $SubBucketField -SubBucketType terms -RecordCount 0 -ElkQuery $query
+    $list = foreach ($bucket in ($ElkQuery.aggregations.buckets.buckets | ?{$_.key -match "\."})){$myip = $bucket.subbuckets.buckets.key | ?{$_ -notmatch $IPExclusionRegex} | select -First 1;$item = "" | Select asset_name,asset_type_name,asset_description,asset_ip,asset_domain,asset_tags; $item.asset_name ="$($bucket.key -split '\.' | select -First 1)"; $item.asset_domain = $(($bucket.key -split '\.' | select -Last 2) -join "."); $item.asset_ip=$myip; if($item.asset_name -match "[0-9]"){$item.asset_type_name = "Windows - Computer"}else{$item.asset_type_name="Windows - Server"}; $item}
+    $list | Sort-Object -Property asset_name | ft -AutoSize
+    $list | ConvertTo-Csv -NoTypeInformation | Out-File -Encoding ascii -FilePath $OutFile
+    Write-Host "CSV file written to $OutFile"
+}
+
+function Get-Sysmon4LinuxParsed{
+    # ex:   $cred = Get-Credential
+    # ex:   Get-Sysmon4LinuxParsed -ElkCredential $cred -DestinationIndex "auto-linux-sysmon" -StartDate (Get-date "2024-04-03T00:00:00Z") -EndDate (Get-date "2024-04-07T00:00:00Z")
+    param(
+        [pscredential]$ElkCredential,
+        [string]$LinuxHostname="",
+        [string]$SourceHostFieldName="host.hostname",
+        [string]$SourceIndex="filebeat-*",
+        [string]$SourceQuery='process.name:sysmon AND NOT _exists_:error.message AND NOT message:("eventid 5 eventid" OR "CommandLine>cp --parents ./elastic" )',
+        [string]$SourceMessageIncludeRegex="\<EventID\>1\<\/EventID\>",
+        [string]$SourceMessageExcludeRegex="(/usr/share/auditbeat/bin/auditbeat|cp --parents ./elastic-agent-8.8.2-linux-x86_64/|/usr/share/filebeat/bin/filebeat --environment systemd -c /etc/filebeat/filebeat.yml|Data Name=.CommandLine.\>(/usr/bin/python3|chmod u\+x|rm -f -r) /home/webuser/.ansible/tmp/ansible-tmp-|(bash -c )?/usr/lib/openssh/sftp-server|/usr/lib/systemd/system-generators/systemd-)",
+        [string]$DestinationIndex="linux-sysmon",
+        [string]$DestinationHostFieldName="hostname",
+        [datetime]$StartDate=(Get-Date).AddDays(-30),
+        [datetime]$EndDate=(Get-Date),
+        [int]$MaxRecordBatchSize=10000, #10000 is the ELK REST API max
+        [int]$DefaultMinutesInterval=360,
+        [double]$DefaultBackoffInterval=0.75,
+        [double]$DefaultExpandInterval=2.0,
+        [double]$DefaultExpandMinimumThreshold=0.45
+    )
+    if(!$ElkCredential){
+        $ElkCredential = Get-Credential -Message "Provide elastic credentials. Username is likely 'elastic'"
+    }
+    
+    $final_query = $SourceQuery
+    if($LinuxHostname -ne ""){
+        $final_query = "host.hostname:`"$LinuxHostname`" AND "+$SourceQuery
+    }
+    
+
+    $hitcount = 0
+    $curr_start = $StartDate
+    $curr_interval = $DefaultMinutesInterval
+
+    $results = Get-ElkRecords -ElkCredential $ElkCredential -ElkIndex $SourceIndex -ElkQuery $final_query -startTime $curr_start -endTime $curr_start.AddMinutes($curr_interval)
+    $hitcount = $results.hits.total.value
+
+    if($hitcount -ge 10000){
+        Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+    }elseif($hitcount -eq 0){
+        Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+    }else{
+        Write-Host -Debug -ForegroundColor Magenta "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+    }
+
+    #$curr_end = $EndDate
+    while($curr_start -lt $EndDate){
+        while($hitcount -eq 0){
+            $curr_start = $curr_start.AddMinutes($curr_interval)
+            $results = Get-ElkRecords -ElkCredential $ElkCredential -ElkIndex $SourceIndex -ElkQuery $final_query -startTime $curr_start -endTime $curr_start.AddMinutes($curr_interval)
+            $hitcount = $results.hits.total.value
+            
+            if($curr_start.AddMinutes($curr_interval) -gt $EndDate){
+                Write-Host "Reached End Date without finding any records. Exiting!"
+                return
+            }
+
+            if($hitcount -ge 10000){
+                Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+            }elseif($hitcount -eq 0){
+                Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+            }else{
+                Write-Host -Debug -ForegroundColor Magenta "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+            }
+        }
+
+        while($hitcount -ge 10000){
+            $curr_interval = [math]::Round(($curr_interval*$DefaultBackoffInterval),0)
+            Write-Host -Debug -ForegroundColor Cyan "Reducing interval to $curr_interval minutes"
+            $results = Get-ElkRecords -ElkCredential $ElkCredential -ElkIndex $SourceIndex -ElkQuery $final_query -startTime $curr_start -endTime $curr_start.AddMinutes($curr_interval)
+            $hitcount = $results.hits.total.value
+        }
+
+        Write-Host -Debug -ForegroundColor Green "Processing $hitcount records..."
+
+        $allresults = $this_hostname = $eventdata = $ht = $null
+        $allresults = $results.hits.hits | ?{$_._source.message -match $SourceMessageIncludeRegex} | ?{$_._source.message -notmatch  $SourceMessageExcludeRegex} | %{
+            $this_hostname = iex "`$_._source.$SourceHostFieldName"; 
+            $this_timestamp = $_._source.'@timestamp'
+            $eventdata = $_._source.message | sls "<EventData>(.*)</EventData>" -AllMatches | % Matches | % Groups | ? Name -EQ 1 | % Value; 
+            $ht = @{}; 
+            $eventdata -split '</Data>' | ?{$_} | %{
+                $matches = $_ | sls "<Data Name=.([A-Z0-9]+).>(.*)" -AllMatches | % Matches | ?{$_}; 
+                foreach($m in $matches){ 
+                    $ht.add($($m | % Groups | ? Name -eq 1 | % Value), $($m | % Groups | ? Name -eq 2 | % Value))
+                }
+            };
+            $ht.Add($DestinationHostFieldName,$this_hostname); 
+            if($ht.UtcTime -eq "" -or $ht.UtcTime -eq $null){
+                $ht.Add("@timestamp",(Get-Date $this_timestamp).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"))
+            }else{
+                $ht.Add("@timestamp",(Get-Date $ht.UtcTime).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"))
+            }
+            Add-ElkRecords -ElkCredential $ElkCredential -ElkIndex $DestinationIndex -recordJson ($ht | ConvertTo-Json -depth 10) | out-null 
+            #[pscustomobject]$ht; 
+
+        } 
+
+        <#
+        foreach ($result in $allresults) {
+            $result | Add-Member -MemberType NoteProperty -Name "@timestamp" -Value (Get-Date $result.UtcTime).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"); 
+            #$result | Add-Member -MemberType NoteProperty -Name "hostname" -Value "rangers-apache"; 
+            Add-ElkRecords -ElkCredential $cred -ElkIndex $DestinationIndex -recordJson ($result | convertto-json -depth 10) | out-null 
+        }
+        #>
+
+        $curr_start=$curr_start.AddMinutes($curr_interval)
+
+        if($hitcount -gt 0 -and $hitcount -lt ($MaxRecordBatchSize * $DefaultExpandMinimumThreshold)){
+            $curr_interval = [math]::Round(($curr_interval*$DefaultExpandInterval),0)
+            Write-Host -Debug -ForegroundColor Cyan "Increasing interval to $curr_interval minutes"
+        }
+        
+        $results = Get-ElkRecords -ElkCredential $ElkCredential -ElkIndex $SourceIndex -ElkQuery $final_query -startTime $curr_start -endTime $curr_start.AddMinutes($curr_interval)
+        $hitcount = $results.hits.total.value
+        if($hitcount -ge 10000){
+            Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+        }elseif($hitcount -eq 0){
+            Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+        }else{
+            Write-Host -Debug -ForegroundColor Magenta "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+        }
+    }
+}
+
+
+#$r2 = Get-ElkRecords -ElkCredential $cred -ElkIndex "filebeat*" -ElkQuery 'host.hostname:"rangers-apache" AND process.name:sysmon AND NOT _exists_:error.message AND NOT message:("eventid 5 eventid" OR "CommandLine>cp --parents ./elastic" )' -startTime (Get-date "2024-04-03T00:00:00Z").AddHours(6) -endTime (Get-date "2024-04-03T00:00:00Z").AddHours(18)
+#$r2.hits.hits.Count
+#$allresults =  $r2.hits.hits | ?{$_._source.message -match "\<EventID\>1\<\/EventID\>"} | ?{$_._source.message -notmatch  "(/usr/share/auditbeat/bin/auditbeat|cp --parents ./elastic-agent-8.8.2-linux-x86_64/|/usr/share/filebeat/bin/filebeat --environment systemd -c /etc/filebeat/filebeat.yml)"} | % _source | % message | %{ $eventdata = $_ | sls "<EventData>(.*)</EventData>" -AllMatches | % Matches | % Groups | ? Name -EQ 1 | % Value; $ht = @{}; $eventdata -split '</Data>' | ?{$_} | %{$matches = $_ | sls "<Data Name=.([A-Z0-9]+).>(.*)" -AllMatches | % Matches | ?{$_}; foreach($m in $matches){ $ht.add($($m | % Groups | ? Name -eq 1 | % Value), $($m | % Groups | ? Name -eq 2 | % Value))}};[pscustomobject]$ht; } 
+#foreach ($result in $allresults) {$result | Add-Member -MemberType NoteProperty -Name "@timestamp" -Value (Get-Date $result.UtcTime).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"); $result | Add-Member -MemberType NoteProperty -Name "hostname" -Value "rangers-apache"; Add-ElkRecords -ElkCredential $cred -ElkIndex "linux-sysmon" -recordJson ($result | convertto-json -depth 10) | out-null }
+
