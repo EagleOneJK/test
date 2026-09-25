@@ -1,75 +1,416 @@
-function Get-ElkRecords{
-    param(
-        [pscredential]$ElkCredential,
-        [switch]$ElkCredentialIsAPIkey,
-        [string]$ElkIndex="winlogbeat*",
-        [string]$ElkQuery="*",
-        [Parameter(ParameterSetName = 'Days')] [Int32]$NumDaysAgoStart=1,
-        [Parameter(ParameterSetName = 'Days')] [Int32]$NumDaysAgoEnd=0,
-        [Parameter(ParameterSetName = 'Minutes')] [Int32]$NumMinutesAgoStart,
-        [Parameter(ParameterSetName = 'Mintues')] [Int32]$NumMinutesAgoEnd,
-        [Parameter(ParameterSetName = 'Hours')] [Int32]$NumHoursAgoStart,
-        [Parameter(ParameterSetName = 'Hours')] [Int32]$NumHoursAgoEnd,
-        [Parameter(ParameterSetName = 'Absolute')] [datetime]$startTime,
-        [Parameter(ParameterSetName = 'Absolute')] [datetime]$endTime,
-        [string]$ElkRestURI="https://elasticsearch.lan:9200",
-        [int]$RecordCount=10000,
-        [bool]$AnalyzeWildcards = $true,
-        [string]$TimeField="@timestamp",
-        [string]$SortField="@timestamp",
-        [ValidateSet("asc","desc")][string]$SortOrder="desc",
-        [switch]$NoTimeField,
-        [switch]$ExcludeSource,
-        [string]$BucketField,
-        [ValidateSet("terms","date_histogram","cardinality")][string]$BucketType="terms",
-        [int32]$BucketSize=500,
-        [int32]$BucketMinDocCount=1,
-        [string]$BucketInterval="1d",
-        [string]$SubBucketField,
-        [ValidateSet("terms","date_histogram","cardinality")][string]$SubBucketType="terms",
-        [int32]$SubBucketSize=50,
-        [int32]$SubBucketMinDocCount=1,
-        [string]$SubBucketInterval="1d",
-        [string]$SubSubBucketField,
-        [ValidateSet("terms","date_histogram","cardinality")][string]$SubSubBucketType="terms",
-        [int32]$SubSubBucketSize=5,
-        [int32]$SubSubBucketMinDocCount=1,
-        [string]$SubSubBucketInterval="1d",
-        [switch]$DebugRequest
 
+function Delete-ELKPointInTime{
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$true)] [string]$PIT_id,
+        [Parameter(Mandatory=$false)] [string]$ELKrestURI,
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ELKCredentialIsAPIKey
     )
+
+    if(!$ElkCredential){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
 
     # Convert creds to Base64
     $unsecureCreds = $ElkCredential.GetNetworkCredential()
     $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
     Remove-Variable unsecureCreds
 
-    if($ElkCredentialIsAPIkey){
-        $authHeader = "ApiKey $base64AuthInfo"
+    if($ElkCredentialIsAPIKey){
+        $headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo)}
     }else{
-        $authHeader = "Basic $base64AuthInfo"
+        $headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    $data = @{"id"=$PIT_id}
+
+    $result = Invoke-RestMethod "$ELKrestURI/_pit" -Method Delete -Headers $headers -ContentType 'application/json' -Body ($data | ConvertTo-Json -Depth 15) #-UseBasicParsing
+    $result
+}
+
+#Export-ElkRecordsToDisk
+function Export-ElkRecordsToDisk{
+    param(
+
+        [Parameter(Mandatory=$false)] [string]$OutputFile="$((Get-Date).ToString("yyyy-MM-ddTHHmm")).json",
+        [Parameter(Mandatory=$false)] [string]$OutputFolder="C:\Temp\",
+        [Parameter(Mandatory=$false)] [switch]$Scroll,
+        [Parameter(Mandatory=$false)] [switch]$PrettyPrint
+
+    )
+    if(!$ElkCredential){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    if($OutputFolder -match "\\$"){ $OutputFolder = $OutputFolder -replace "\\$",""}
+    
+    Remove-TypeData -TypeName System.Array -ErrorAction SilentlyContinue
+
+    if($pscmdlet.ParameterSetName -match "Days"){
+        if($Scroll){        
+            $records = Get-ELKRecords -ELKrestURI $ELKrestURI -ELKIndex $ELKIndex -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ELKCredentialIsAPIKey -ELKQuery $ELKQuery -numDaysAgoStart:$numDaysAgoStart -numDaysAgoEnd:$numDaysAgoEnd -TimeField:$TimeField -NoTimeField:$NoTimeField -Scroll  #-numDaysAgoStart 2000 -TimeField 'RecordDate' -Scroll
+        }else{
+            $records = Get-ELKRecords -ELKrestURI $ELKrestURI -ELKIndex $ELKIndex -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ELKCredentialIsAPIKey -ELKQuery $ELKQuery -numDaysAgoStart:$numDaysAgoStart -numDaysAgoEnd:$numDaysAgoEnd -TimeField:$TimeField -NoTimeField:$NoTimeField -PointInTime
+        }
+    }else{
+        if($Scroll){
+            $records = Get-ELKRecords -ELKrestURI $ELKrestURI -ELKIndex $ELKIndex -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ELKCredentialIsAPIKey -ELKQuery $ELKQuery -startTime:$startTime -endTime:$endTime -TimeField:$TimeField -NoTimeField:$NoTimeField -Scroll  #-numDaysAgoStart 2000 -TimeField 'RecordDate' -Scroll
+        }else{
+            $records = Get-ELKRecords -ELKrestURI $ELKrestURI -ELKIndex $ELKIndex -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ELKCredentialIsAPIKey -ELKQuery $ELKQuery -startTime:$startTime -endTime:$endTime -TimeField:$TimeField -NoTimeField:$NoTimeField -PointInTime  #-numDaysAgoStart 2000 -TimeField 'RecordDate' -Scroll
+        }
+    }
+
+    $i = 0
+
+    if($records.hits.total.relation -eq "gte"){
+        Write-Host -Debug -ForegroundColor Green "Found more than $($records.hits.total.value) records"
+        if($Scroll){Write-Host -Debug -ForegroundColor Green "Scrolling..."}else{Write-Host -Debug -ForegroundColor Green "Scrolling via Point In Time (PIT) API..."}
+    }else{
+        Write-Host -Debug -ForegroundColor Green "Found $($records.hits.total.value) records"
     }
     
-    $headers = @{authorization=$authHeader;"content-type"="application/json"}
+    while($records.hits.hits.count -gt 0){
+        if($records.hits.total.value -ge 10000){
+            $tmpFilename = ($OutputFile -split "\.json" | select -first 1) + ".$i.json"
+        }else{
+            $tmpFilename = $OutputFile
+        }
+        Write-Host -Debug -ForegroundColor Green "Writing $($records.hits.hits.count) records to $OutputFolder\$tmpFilename"
+        if(Test-Path -PathType Leaf -Path "$OutputFolder\$tmpFilename"){Remove-Item -Force "$OutputFolder\$tmpFilename"}
+        if($PrettyPrint){
+            $records.hits.hits | ConvertTo-Json -Depth 10 | Out-File -Append -Encoding ascii -Force -FilePath "$OutputFolder\$tmpFilename"
+        }else{
+            $records.hits.hits | ConvertTo-Json -Depth 10 -Compress | Out-File -Append -Encoding ascii -Force -FilePath "$OutputFolder\$tmpFilename"
+        }
+        #Write-Host -Debug -ForegroundColor Yellow "total $($records.hits.total.value) relation $($records.hits.total.relation)"
+        if($records.hits.total.value -ge 10000){
+
+            if($pscmdlet.ParameterSetName -match "Days"){
+                if($Scroll){
+                    $records = Get-ELKRecords -ELKrestURI $ELKrestURI -ELKIndex $ELKIndex -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ELKCredentialIsAPIKey -ELKQuery $ELKQuery -numDaysAgoStart:$numDaysAgoStart -numDaysAgoEnd:$numDaysAgoEnd -TimeField:$TimeField -NoTimeField:$NoTimeField -ScrollID $records._scroll_id
+                }else{
+                    $records = Get-ELKRecords -ELKrestURI $ELKrestURI -ELKIndex $ELKIndex -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ELKCredentialIsAPIKey -ELKQuery $ELKQuery -numDaysAgoStart:$numDaysAgoStart -numDaysAgoEnd:$numDaysAgoEnd -TimeField:$TimeField -NoTimeField:$NoTimeField -PointInTimeID $records.pit_id -PointInTimeSearchAfter $records.hits.hits[-1].sort
+                }
+            }else{
+                if($Scroll){
+                    $records = Get-ELKRecords -ELKrestURI $ELKrestURI -ELKIndex $ELKIndex -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ELKCredentialIsAPIKey -ELKQuery $ELKQuery -startTime:$startTime -endTime:$endTime -TimeField:$TimeField -NoTimeField:$NoTimeField -ScrollID $records._scroll_id
+                }else{
+                    $records = Get-ELKRecords -ELKrestURI $ELKrestURI -ELKIndex $ELKIndex -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ELKCredentialIsAPIKey -ELKQuery $ELKQuery -startTime:$startTime -endTime:$endTime -TimeField:$TimeField -NoTimeField:$NoTimeField -PointInTimeID $records.pit_id -PointInTimeSearchAfter $records.hits.hits[-1].sort
+                }
+            }
+        }else{
+            return
+        }
+        $i++
+    }
+    if($records -and $records.pit_id){
+        $d = Delete-ELKPointInTime -PIT_id $records.pit_id -ELKrestURI $ELKrestURI -ElkCredential $ElkCredential -ELKCredentialIsAPIKey:$ELKCredentialIsAPIKey
+        if($d){Write-Host -Debug -ForegroundColor Green "PIT removed"}
+    }
+    
+}
+
+function Remove-ELKIndex{
+    param(
+        [CmdletBinding()]
+        [string]$ELKrestURI,
+        [Parameter(Mandatory=$true)] [string]$ELKIndex,
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ELKCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [switch]$Force
+    )
+    if(!$ElkCredential){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    $encoding = [System.Text.Encoding]::ASCII
+    $uencoding = [System.Text.Encoding]::UNICODE
+
+    if(!$force){
+        $confirmation = Get-Random -InputObject @("WEAPONS-FREE","FIRE-ZE-MISSILES","BOMBS-AWAY","HOLD ONTO YOUR BUTTS", "HERE GOES NOTHING")
+        $input = Read-Host -Prompt "You are about to delete the $ELKIndex index.  THIS ACTION IS IRREVERSIBLE ARE YOU SURE YOU WANT TO NUKE ALL THAT DATA? (type: '$confirmation' to confirm)"
+        if($input -ne $confirmation){return} 
+    }
+
+    $fullURI = "$ELKrestURI/$ELKIndex/$documentType"
+
+    try{
+        $response = Invoke-RestMethod -Uri $fullURI -Method Delete -Headers $headers -Body $bodyJson -ContentType 'application/json'
+    }catch{
+        
+    }
+    return $response 
+}
+
+function Get-HashtableRecursiveContains{
+    param([hashtable]$hashtable,[string[]]$NestedElements)
+    #Write-Host -Debug -ForegroundColor Cyan $elements
+    #Write-Host -Debug -ForegroundColor DarkCyan $obj
+    if($hashtable -eq $null -or $NestedElements.Count -le 0){return $false}
+    if($NestedElements.Count -eq 1){
+        return ([hashtable]$hashtable).Contains($NestedElements[0])
+    }else{
+        [hashtable]$newHT = [hashtable]($hashtable.$($NestedElements[0]))
+        $null,[object[]]$NewElements=$NestedElements
+        return Get-HashtableRecursiveContains -hashtable ([hashtable]$newHT) -NestedElements $NewElements
+    }
+}
+
+function ConvertTo-Hashtable {
+    #https://4sysops.com/archives/convert-json-to-a-powershell-hash-table/
+    [CmdletBinding()]
+    [OutputType('hashtable')]
+    param (
+        [Parameter(ValueFromPipeline)]
+        $InputObject
+    )
+    process {
+        ## Return null if the input is null. This can happen when calling the function
+        ## recursively and a property is null
+        if ($null -eq $InputObject) {
+            return $null
+        }
+        ## Check if the input is an array or collection. If so, we also need to convert
+        ## those types into hash tables as well. This function will convert all child
+        ## objects into hash tables (if applicable)
+        if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+            $collection = @(
+                foreach ($object in $InputObject) {
+                    ConvertTo-Hashtable -InputObject $object
+                }
+            )
+            ## Return the array but don't enumerate it because the object may be pretty complex
+            Write-Output -NoEnumerate $collection
+        } elseif ($InputObject -is [psobject]) { ## If the object has properties that need enumeration
+            ## Convert it to its own hash table and return it
+            $hash = @{}
+            foreach ($property in $InputObject.PSObject.Properties) {
+                $hash[$property.Name] = ConvertTo-Hashtable -InputObject $property.Value
+            }
+            $hash
+        } else {
+            ## If the object isn't an array, collection, or other object, it's already a hash table
+            ## So just return it.
+            $InputObject
+        }
+    }
+}
+
+function Delete-RecordFromELK{
+    [Alias("Delete-HuntRecordFromELK")]
+    [Alias("Delete-ELKRecord")]
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$true)]  [string]$recordID,
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:9200",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ELKCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [string]$ELKIndex="hunt",
+        [Parameter(Mandatory=$false)] [string]$documentType="_doc"
+    )
+    if(!$ElkCredential){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    $fullURI = "$ELKrestURI/$ELKIndex/$documentType/$recordID"
+
+    $response = Invoke-RestMethod -Uri $fullURI -Method Delete -Headers $headers -ContentType 'application/json'
+    return $response
+}
+Set-Alias -Name Delete-ELKRecord -Value Delete-RecordFromELK -Scope Global -Force -Option AllScope
+Set-Alias -Name Remove-ELKRecord -Value Delete-RecordFromELK -Scope Global -Force -Option AllScope
+
+function Get-ELKRecords{
+     param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:9200",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [string]$ELKIndex="hunt*",
+        [Parameter(Mandatory=$false)] [string]$ELKQuery='*',
+        [Parameter(Mandatory=$false)] [string[]]$ELKQueryParameters, # ie "max_concurrent_shard_requests=16&ignore_unavailable=true" #[ValidateSet("terms","cardinality","sum","date_histogram")]  # POST /elastalert3*/_async_search?batched_reduce_size=64&ccs_minimize_roundtrips=true&wait_for_completion_timeout=200ms&keep_on_completion=true&keep_alive=60000ms&max_concurrent_shard_requests=16&ignore_unavailable=true&preference=1763638687136
+        [Parameter(Mandatory=$false,ParameterSetName="Minutes")]   [int]$numMinutesAgoStart=60,
+        [Parameter(Mandatory=$false,ParameterSetName="Minutes")]   [int]$numMinutesAgoEnd=0,
+        [Parameter(Mandatory=$True,ParameterSetName="Hours")]      [int]$numHoursAgoStart,
+        [Parameter(Mandatory=$false,ParameterSetName="Hours")]     [int]$numHoursAgoEnd,
+        [Parameter(Mandatory=$True,ParameterSetName="Days")]       [int]$numDaysAgoStart,
+        [Parameter(Mandatory=$false,ParameterSetName="Days")]      [int]$numDaysAgoEnd,
+        [Parameter(Mandatory=$True,ParameterSetName="exactTime")]  [datetime]$startTime,
+        [Parameter(Mandatory=$false,ParameterSetName="exactTime")] [datetime]$endTime,
+        [Parameter(Mandatory=$false)] [string]$TimeField = "@timestamp",
+        [Parameter(Mandatory=$false)] [switch]$NoTimeField,
+        [Parameter(Mandatory=$false)] [string]$SortField=$TimeField,
+        [Parameter(Mandatory=$false)] [ValidateSet("asc","desc")] [string]$SortOrder="desc",
+        [Parameter(Mandatory=$false)] [switch]$ExcludeSource,
+        [Parameter(Mandatory=$false)] [string[]]$Fields,
+        [Parameter(Mandatory=$false)] [ValidateRange(0,10000)] [int]$RecordCount=10000,
+        [Parameter(Mandatory=$false)] [string]$TimeZone="+00:00", #"-06:00"  "-05:00" https://www.elastic.co/guide/en/elasticsearch/reference/current/search-aggregations-bucket-datehistogram-aggregation.html#datehistogram-aggregation-time-zone
+        [Parameter(Mandatory=$false)] [switch]$UseLocalTimeZone,
+        [Parameter(Mandatory=$false)] [string]$Offset="+0h", #Used to offset the buckets when aggregrating
+
+        [Parameter(Mandatory=$false)] [string]$AggregationJson,
+        
+        [Parameter(Mandatory=$false)] [ValidateSet("terms","cardinality","sum","avg","percentiles","date_histogram")] [string[]]$BucketType="terms",
+        [Parameter(Mandatory=$false)] [switch]$BucketDescriptiveNames,
+        [Parameter(Mandatory=$false)] [string]$BucketField,
+        [Parameter(Mandatory=$false)] [string]$BucketSortField,
+        [Parameter(Mandatory=$false)] [ValidateSet("asc","desc")] [string]$BucketSortOrder="desc",
+        [Parameter(Mandatory=$false)] [int]$BucketSize=5000,
+        [Parameter(Mandatory=$false)] [string]$BucketInterval="6h",
+        [Parameter(Mandatory=$false)] [int]$BucketMinDocCount=1,
+        [Parameter(Mandatory=$false)] [ValidateRange(0.1,99.9)] [double[]]$BucketPercents=50.0,
+        
+        [Parameter(Mandatory=$false)] [ValidateSet("terms","cardinality","sum","avg","percentiles","date_histogram")] [string[]]$SubBucketType="terms",
+        [Parameter(Mandatory=$false)] [switch]$SubBucketDescriptiveNames,
+        [Parameter(Mandatory=$false)] [string]$SubBucketField,
+        [Parameter(Mandatory=$false)] [string]$SubBucketSortField,
+        [Parameter(Mandatory=$false)] [ValidateSet("asc","desc")] [string]$SubBucketSortOrder="desc",
+        [Parameter(Mandatory=$false)] [int]$SubBucketSize=200,
+        [Parameter(Mandatory=$false)] [string]$SubBucketInterval="6h",
+        [Parameter(Mandatory=$false)] [int]$SubBucketMinDocCount=1,
+        [Parameter(Mandatory=$false)] [ValidateRange(0.1,99.9)] [double[]]$SubBucketPercents=50.0,
+
+        [Parameter(Mandatory=$false)] [ValidateSet("terms","cardinality","sum","avg","percentiles","date_histogram")] [string[]]$SubSubBucketType="terms",
+        [Parameter(Mandatory=$false)] [switch]$SubSubBucketDescriptiveNames,
+        [Parameter(Mandatory=$false)] [string]$SubSubBucketField,
+        [Parameter(Mandatory=$false)] [string]$SubSubBucketSortField,
+        [Parameter(Mandatory=$false)] [ValidateSet("asc","desc")] [string]$SubSubBucketSortOrder="desc",
+        [Parameter(Mandatory=$false)] [int]$SubSubBucketSize=3,
+        [Parameter(Mandatory=$false)] [string]$SubSubBucketInterval="6h",
+        [Parameter(Mandatory=$false)] [int]$SubSubBucketMinDocCount=1,
+        [Parameter(Mandatory=$false)] [ValidateRange(0.1,99.9)] [double[]]$SubSubBucketPercents=50.0,
+
+        [Parameter(Mandatory=$false)] [ValidateSet("terms","cardinality","sum","avg","percentiles","date_histogram")] [string[]]$SubSubSubBucketType="terms",
+        [Parameter(Mandatory=$false)] [switch]$SubSubSubBucketDescriptiveNames,
+        [Parameter(Mandatory=$false)] [string]$SubSubSubBucketField,
+        [Parameter(Mandatory=$false)] [string]$SubSubSubBucketSortField,
+        [Parameter(Mandatory=$false)] [ValidateSet("asc","desc")] [string]$SubSubSubBucketSortOrder="desc",
+        [Parameter(Mandatory=$false)] [int]$SubSubSubBucketSize=3,
+        [Parameter(Mandatory=$false)] [string]$SubSubSubBucketInterval="6h",
+        [Parameter(Mandatory=$false)] [int]$SubSubSubBucketMinDocCount=1,
+        [Parameter(Mandatory=$false)] [ValidateRange(0.1,99.9)] [double[]]$SubSubSubBucketPercents=50.0,
+
+        [Parameter(Mandatory=$false)] [switch]$Scroll,
+        [Parameter(Mandatory=$false)] [string]$ScrollID="",
+        [Parameter(Mandatory=$false)] [int]$KeepAliveMinutes=15,
+        [Parameter(Mandatory=$false)] [switch]$PointInTime,
+        [Parameter(Mandatory=$false)] [string]$PointInTimeID="",
+        [Parameter(Mandatory=$false)] [string[]]$PointInTimeSearchAfter="", #should be the value of the last "Sort" item in the previous list of results 
+        [Parameter(Mandatory=$false)] [switch]$DebugQuery,
+        [Parameter(Mandatory=$false)] [switch]$DebugRequest,
+        [Parameter(Mandatory=$false)] [int]$TimeoutSec=0,
+        [Parameter(Mandatory=$false)] [switch]$Profiler,
+        [Parameter(Mandatory=$false)] [bool]$AnalyzeWildcards=$True
+    )
+    
+    if(!$ElkCredential){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    if($ELKIndex -match "^hunt"){$TimeField = "event_time"}
+
+    if($UseLocalTimeZone){[string]$TimeZone=[string]$TimeZone="{0:D2}:00" -f ([System.DateTimeOffset]::Now).Offset.Hours}
+
+    if($AggregationJson -and $BucketField){
+        Write-Host -Debug -ForegroundColor Red "Cannot supply JSON aggregation string and build dynamic aggregation query. Pick one."
+        return
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo)} #$headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo); charset="UTF-8"}
+    }else{
+        $headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)} #$headers = @{Authorization=("Basic {0}" -f $base64AuthInfo); charset="UTF-8"}
+    }
+    
+    $start = ""
+    $end=""
 
     if($startTime -or $endTime){
         if(!$endTime){$endTime = Get-Date}
-        if(($startTime -gt $dstStart) -and ($startTime -lt $dstEnd)){$startTZD = $tzdiffDST}
-        if(($endTime -gt $dstStart) -and ($endTime -lt $dstEnd)){$endTZD = $tzdiffDST}
-        [string]$start = $startTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
-        [string]$end = $endTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+        if(!$startTime){$startTime = (Get-Date).AddYears(-1)}
+        if($startTime -ge $endTime){
+            Write-Host -Debug -ForegroundColor Red "ERROR! Query Start Time must be before Query End time chronologically"
+            return
+        }
+        [string]$start = $startTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+        [string]$end = $endTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
     }elseif($numHoursAgoStart -or $numHoursAgoEnd){
-        $interval = "h"
-        if($numHoursAgoStart -ge 0){[string]$start = "now-$($numHoursAgoStart)$interval"}else{[string]$start = "now+$(0-$numHoursAgoStart)$interval"}
-        if($numHoursAgoEnd -ge 0){[string]$end = "now-$($numHoursAgoEnd)$interval"}else{[string]$end = "now+$(0-$numHoursAgoEnd)$interval"}
+        if($numHoursAgoStart -le $numHoursAgoEnd){
+            Write-Host -Debug -ForegroundColor Red "ERROR! Query Start Time must be before Query End time chronologically. numHoursAgoStart must be greater than numHoursAgoEnd."
+            return
+        }
+        if($numHoursAgoStart -lt 0 -or $numHoursAgoEnd -lt 0){
+            [string]$start = (Get-Date).AddHours(0-$numHoursAgoStart).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+            [string]$end = (Get-Date).AddHours(0-$numHoursAgoEnd).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+        }else{
+            $interval = "h"
+            [string]$start = "now-$($numHoursAgoStart)$interval"
+            [string]$end = "now-$($numHoursAgoEnd)$interval"
+        }
     }elseif($numDaysAgoStart -or $numDaysAgoEnd){
-        $interval = "d"
-        if($numDaysAgoStart -ge 0){[string]$start = "now-$($numDaysAgoStart)$interval"}else{[string]$start = "now+$(0-$numDaysAgoStart)$interval"}
-        if($numDaysAgoEnd -ge 0){[string]$end = "now-$($numDaysAgoEnd)$interval"}else{[string]$end = "now+$(0-$numDaysAgoEnd)$interval"}
+        if($numDaysAgoStart -le $numDaysAgoEnd){
+            Write-Host -Debug -ForegroundColor Red "ERROR! Query Start Time must be before Query End time chronologically. numDaysAgoStart must be greater than numDaysAgoEnd."
+            return
+        }
+        if($numDaysAgoStart -lt 0 -or $numDaysAgoEnd -lt 0){
+            [string]$start = (Get-Date).AddDays(0-$numDaysAgoStart).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+            [string]$end = (Get-Date).AddDays(0-$numDaysAgoEnd).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+        }else{
+            $interval = "d"
+            [string]$start = "now-$($numDaysAgoStart)$interval"
+            [string]$end = "now-$($numDaysAgoEnd)$interval"
+        }
     }else{
-        $interval = "m"
-        if($numMinutesAgoStart -ge 0){[string]$start = "now-$($numMinutesAgoStart)$interval"}else{[string]$start = "now+$(0-$numMinutesAgoStart)$interval"}
-        if($numMinutesAgoEnd -ge 0){[string]$end = "now-$($numMinutesAgoEnd)$interval"}else{[string]$end = "now+$(0-$numMinutesAgoEnd)$interval"}
+        if($numMinutesAgoStart -le $numMinutesAgoEnd){
+            Write-Host -Debug -ForegroundColor Red "ERROR! Query Start Time must be before Query End time chronologically. numMinutesAgoStart must be greater than numMinutesAgoEnd."
+            return
+        }
+        if($numMinutesAgoStart -lt 0 -or $numMinutesAgoEnd -lt 0){
+            [string]$start = (Get-Date).AddMinutes(0-$numMinutesAgoStart).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+            [string]$end = (Get-Date).AddMinutes(0-$numMinutesAgoEnd).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+        }else{
+            $interval = "m"
+            [string]$start = "now-$($numMinutesAgoStart)$interval"
+            [string]$end = "now-$($numMinutesAgoEnd)$interval"
+        }
     }
 
     $query = @{size=$RecordCount; query = @{bool = @{must = @(@{query_string = @{query = $ELKQuery; analyze_wildcard=$AnalyzeWildcards}});filter = @{range = @{$TimeField = @{gte = $start; lt = $end}}}}};sort = @{$SortField = @{order = $SortOrder}};}
@@ -79,284 +420,1883 @@ function Get-ElkRecords{
     if($ExcludeSource){
         $query.Add('_source',$false)
     }
+    if($Profiler){
+        $query.Add('profile',$true)
+    }
+    if($Fields){
+        if(!$ExcludeSource){$query.Add('_source',$false)}
+        if(!$query.ContainsKey('fields')){$query.Add('fields',$Fields)
+        }else{$query['fields'] += $Fields}
+    }
 
     if($BucketField){
-        if($BucketType -eq "terms"){
-            $query.aggs = @{ buckets=@{$BucketType = @{"field"= $BucketField;"size"= $BucketSize; "min_doc_count" = $BucketMinDocCount; order = @{_count = "desc"}}}}
-        }elseif($BucketType -eq "date_histogram"){
-            $query.aggs = @{ buckets=@{$BucketType = @{"field"= $BucketField;"fixed_interval" = $BucketInterval;"min_doc_count"=$BucketMinDocCount}}}
-        }else{
-            $query.aggs = @{ buckets=@{$BucketType = @{"field"= $BucketField}}}
+        $bucket_count = $BucketType.Count
+        $this_bucket_number = 1
+        foreach($bt in $BucketType){
+            if(!$query.ContainsKey("aggs")){$query.aggs = @{}}
+            
+            if($BucketDescriptiveNames){
+                if($bt -eq "terms"){
+                    $this_bucket_name = $BucketField -replace "[^a-z0-9]","_"
+                }else{
+                    $this_bucket_name = $bt
+                }
+            }else{
+                if($bucket_count -eq 1){
+                    $this_bucket_name = "buckets"
+                }else{
+                    $this_bucket_name = "buckets$this_bucket_number"
+                }
+            }
+
+            if($bt -eq "terms"){
+                $query.aggs.$this_bucket_name=@{$bt = @{"field"= $BucketField;"size"= $BucketSize; "min_doc_count" = $BucketMinDocCount; order = @{_count = "desc"}}}
+            }elseif($bt -eq "date_histogram"){
+                $query.aggs.$this_bucket_name=@{$bt = @{"field"= $BucketField;"fixed_interval" = $BucketInterval;"min_doc_count"=$BucketMinDocCount;"time_zone"=$TimeZone;"offset"=$Offset}}
+            }elseif($bt -eq "percentiles"){
+                $query.aggs.$this_bucket_name=@{$bt = @{"field"= $BucketField;"percents" = $BucketPercents}}
+            }else{
+                $query.aggs.$this_bucket_name=@{$bt = @{"field"= $BucketField}}
+            }
+            $this_bucket_number++
         }
-        
+        if($BucketSortField){
+            $tmp_bucket_name = $($query.aggs.Keys | select -first 1)
+            $tmp_bucket_type = $($query.aggs.$tmp_bucket_name.Keys | select -first 1)
+            $query.aggs.$tmp_bucket_name.$tmp_bucket_type.order = @{"$BucketSortField" = $BucketSortOrder}
+        }else{
+            $tmp_bucket_name = $this_bucket_name
+        }
 
         if($SubBucketField){
-            if($SubBucketType -eq "terms"){
-                $query.aggs.buckets.aggs = @{ subbuckets=@{$SubBucketType = @{"field"= $SubBucketField; "size"= $SubBucketSize; "min_doc_count" = $SubBucketMinDocCount; order = @{_count = "desc"}}}}
-            }elseif($SubBucketType -eq "date_histogram"){
-                $query.aggs.buckets.aggs = @{ subbuckets=@{$SubBucketType = @{"field"= $SubBucketField;"fixed_interval" = $SubBucketInterval;"min_doc_count"=$SubBucketMinDocCount}}}
-            }else{
-                $query.aggs.buckets.aggs = @{ subbuckets=@{$SubBucketType = @{"field"= $SubBucketField; }}}
+            $subbucket_count = $SubBucketType.Count
+            $this_subbucket_number = 1
+            foreach($sbt in $SubBucketType){
+                if(!$query.ContainsKey("aggs") -or $query.aggs.Keys.count -ne 1){
+                    Write-Host -Debug -ForegroundColor Yellow "Query contains aggs:$($query.ContainsKey("aggs")) | Aggs key count:$($query.aggs.Keys.count)"
+                    Write-Host -Debug -ForegroundColor Red "Unable to do a nested aggregation without a parent aggregation of a single bucket type"
+                    return
+                }
+                $bucket_name = $query.aggs.keys | select -First 1
+                if(!$query.aggs.$bucket_name.ContainsKey("aggs")){$query.aggs.$bucket_name.aggs = @{}}
+                
+                if($SubBucketDescriptiveNames){
+                    if($sbt -eq "terms"){
+                        $this_subbucket_name = $SubBucketField -replace "[^a-z0-9]","_"
+                    }else{
+                        $this_subbucket_name = $sbt
+                    }
+                }else{
+                    if($subbucket_count -eq 1){
+                        $this_subbucket_name = "subbuckets"
+                    }else{
+                        $this_subbucket_name = "subbuckets$this_subbucket_number"
+                    }
+                }
+
+                if($sbt -eq "terms"){
+                    $query.aggs.$bucket_name.aggs.$this_subbucket_name=@{$sbt = @{"field"= $SubBucketField; "size"= $SubBucketSize; "min_doc_count" = $SubBucketMinDocCount; order = @{_count = "desc"}}}
+                }elseif($sbt -eq "date_histogram"){
+                    $query.aggs.$bucket_name.aggs.$this_subbucket_name=@{$sbt = @{"field"= $SubBucketField;"fixed_interval" = $SubBucketInterval;"min_doc_count"=$SubBucketMinDocCount;"time_zone"=$TimeZone;"offset"=$Offset}}
+                }elseif($sbt -eq "percentiles"){
+                    $query.aggs.$bucket_name.aggs.$this_subbucket_name=@{$sbt = @{"field"= $SubBucketField;"percents" = $SubBucketPercents}}
+                }else{
+                    $query.aggs.$bucket_name.aggs.$this_subbucket_name=@{$sbt = @{"field"= $SubBucketField; }}
+                }
+                $this_subbucket_number++
+
+                if($SubBucketSortField){
+                    $tmp_subbucket_name = $($query.aggs.$tmp_bucket_name.aggs.Keys | select -first 1)
+                    $tmp_subbucket_type = $($query.aggs.$tmp_bucket_name.aggs.$tmp_subbucket_name.Keys | select -first 1)
+                    $query.aggs.$tmp_bucket_name.aggs.$tmp_subbucket_name.$tmp_subbucket_type.order = @{"$SubBucketSortField" = $SubBucketSortOrder}
+                }
             }
 
             if($SubSubBucketField){
-                if($SubSubBucketType -eq "terms"){
-                    $query.aggs.buckets.aggs.subbuckets.aggs = @{ subsubbuckets=@{$SubSubBucketType = @{"field"= $SubSubBucketField; "size"= $SubSubBucketSize; "min_doc_count" = $SubSubBucketMinDocCount; order = @{_count = "desc"}}}}
-                }elseif($SubSubBucketType -eq "date_histogram"){
-                    $query.aggs.buckets.aggs.subbuckets.aggs = @{ subsubbuckets=@{$SubSubBucketType = @{"field"= $SubSubBucketField;"fixed_interval" = $SubSubBucketInterval;"min_doc_count"=$SubSubBucketMinDocCount}}}
-                }else{
-                    $query.aggs.buckets.aggs.subbuckets.aggs = @{ subsubbuckets=@{$SubSubBucketType = @{"field"= $SubSubBucketField}}}
+                $subsubbucket_count = $SubSubBucketType.Count
+                $this_subsubbucket_number = 1
+                foreach($ssbt in $SubSubBucketType){
+                    if(!$query.ContainsKey("aggs") -or $query.aggs.Keys.count -ne 1 -or !$query.aggs.ContainsKey($bucket_name) -or !$query.aggs.$bucket_name.ContainsKey("aggs") -or $query.aggs.$bucket_name.aggs.Keys.count -ne 1){
+                        Write-Host -Debug -ForegroundColor Yellow "BucketName:$bucket_name | SubbucketName:$($query.aggs.$bucket_name.aggs.keys | select -First 1) | SubsubbucketName:$()"
+                        Write-Host -Debug -ForegroundColor Yellow "Query contains aggs key:$($query.ContainsKey("aggs")) | Query Aggs keycount:$($query.aggs.Keys.count) | Query aggs contains $($bucket_name):$($query.aggs.ContainsKey($bucket_name)) | Query aggs $bucket_name containskey aggs:$($query.aggs.$bucket_name.ContainsKey("aggs")) | $bucket_name Aggs key count:$($query.aggs.$bucket_name.aggs.Keys.count)"
+                        Write-Host -Debug -ForegroundColor Red "Unable to do a nested aggregation without a parent aggregation of a single bucket type"
+                        Write-Host -Debug -ForegroundColor Magenta $($query | ConvertTo-Json -Depth 10)
+                        return
+                    }
+                    $subbucket_name = $query.aggs.$bucket_name.aggs.keys | select -First 1
+                    if(!$query.aggs.$bucket_name.aggs.$subbucket_name.ContainsKey("aggs")){$query.aggs.$bucket_name.aggs.$subbucket_name.aggs = @{}}
+            
+                    if($SubSubBucketDescriptiveNames){
+                        if($ssbt -eq "terms"){
+                            $this_subsubbucket_name = $SubSubBucketField -replace "[^a-z0-9]","_"
+                        }else{
+                            $this_subsubbucket_name = $ssbt
+                        }
+                    }else{
+                        if($subsubbucket_count -eq 1){
+                            $this_subsubbucket_name = "subsubbuckets"
+                        }else{
+                            $this_subsubbucket_name = "subsubbuckets$this_subsubbucket_number"
+                        }
+                    }
+
+                    if($ssbt -eq "terms"){
+                        $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$this_subsubbucket_name=@{$ssbt = @{"field"= $SubSubBucketField; "size"= $SubSubBucketSize; "min_doc_count" = $SubSubBucketMinDocCount; order = @{_count = "desc"}}}
+                    }elseif($ssbt -eq "date_histogram"){
+                        $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$this_subsubbucket_name=@{$ssbt = @{"field"= $SubSubBucketField;"fixed_interval" = $SubSubBucketInterval;"min_doc_count"=$SubSubBucketMinDocCount;"time_zone"=$TimeZone;"offset"=$Offset}}
+                    }elseif($ssbt -eq "percentiles"){
+                        $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$this_subsubbucket_name=@{$ssbt = @{"field"= $SubSubBucketField;"percents" = $SubSubBucketPercents}}
+                    }else{
+                        $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$this_subsubbucket_name=@{$ssbt = @{"field"= $SubSubBucketField}}
+                    }
+                    $this_subsubbucket_number++
+
+                    if($SubSubBucketSortField){
+                        $tmp_subsubbucket_name = $($query.aggs.$tmp_bucket_name.aggs.$tmp_subbucket_name.aggs.Keys | select -first 1)
+                        $tmp_subsubbucket_type = $($query.aggs.$tmp_bucket_name.aggs.$tmp_subbucket_name.aggs.$tmp_subsubbucket_name.Keys | select -first 1)
+                        $query.aggs.$tmp_bucket_name.aggs.$tmp_subbucket_name.aggs.$tmp_subsubbucket_name.aggs.$tmp_subsubbucket_type.order = @{"$SubSubBucketSortField" = $SubSubBucketSortOrder}
+                    }
                 }
 
-            }
+                if($SubSubSubBucketField){
+                    $subsubsubbucket_count = $SubSubSubBucketType.Count
+                    $this_subsubsubbucket_number = 1
+                    foreach($sssbt in $SubSubSubBucketType){
+                        if(!$query.ContainsKey("aggs") -or $query.aggs.Keys.count -ne 1 -or !$query.aggs.ContainsKey($bucket_name) -or !$query.aggs.$bucket_name.ContainsKey("aggs") -or $query.aggs.$bucket_name.aggs.Keys.count -ne 1 -or !$query.aggs.$bucket_name.aggs.$subbucket_name.ContainsKey("aggs") -or $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.Keys.count -ne 1){
+                            Write-Host -Debug -ForegroundColor Yellow "BucketName:$bucket_name | SubbucketName:$($query.aggs.$bucket_name.aggs.keys | select -First 1) | SubSubbucketName:$($query.aggs.$bucket_name.aggs.$subbucket_name.aggs.keys | select -First 1) | SubSubSubbucketName:$()"
+                            Write-Host -Debug -ForegroundColor Yellow "Query contains aggs key:$($query.ContainsKey("aggs")) | Query Aggs keycount:$($query.aggs.Keys.count) | Query aggs contains $($bucket_name):$($query.aggs.ContainsKey($bucket_name)) | Query aggs $bucket_name containskey aggs:$($query.aggs.$bucket_name.ContainsKey("aggs")) | $bucket_name Aggs key count:$($query.aggs.$bucket_name.aggs.Keys.count) |  Query aggs $subbucket_name containskey aggs:$($query.aggs.$bucket_name.aggs.$subbucket_name.ContainsKey("aggs")) | $subbucket_name Aggs key count:$($query.aggs.$bucket_name.aggs.$subbucket_name.aggs.Keys.count)"
+                            Write-Host -Debug -ForegroundColor Red "Unable to do a nested aggregation without a parent aggregation of a single bucket type"
+                            Write-Host -Debug -ForegroundColor Magenta $($query | ConvertTo-Json -Depth 10)
+                            return
+                        }
+                        $subsubbucket_name = $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.keys | select -First 1
+                        if(!$query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$subsubbucket_name.ContainsKey("aggs")){$query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$subsubbucket_name.aggs = @{}}
+            
+                        if($SubSubBucketDescriptiveNames){
+                            if($sssbt -eq "terms"){
+                                $this_subsubsubbucket_name = $SubSubSubBucketField -replace "[^a-z0-9]","_"
+                            }else{
+                                $this_subsubsubbucket_name = $sssbt
+                            }
+                        }else{
+                            if($subsubsubbucket_count -eq 1){
+                                $this_subsubbucket_name = "subsubsubbuckets"
+                            }else{
+                                $this_subsubbucket_name = "subsubsubbuckets$this_subsubsubbucket_number"
+                            }
+                        }
 
+                        if($sssbt -eq "terms"){
+                            $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$subsubbucket_name.aggs.$this_subsubsubbucket_name=@{$sssbt = @{"field"= $SubSubSubBucketField; "size"= $SubSubSubBucketSize; "min_doc_count" = $SubSubSubBucketMinDocCount; order = @{_count = "desc"}}}
+                        }elseif($sssbt -eq "date_histogram"){
+                            $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$subsubbucket_name.aggs.$this_subsubsubbucket_name=@{$sssbt = @{"field"= $SubSubSubBucketField;"fixed_interval" = $SubSubSubBucketInterval;"min_doc_count"=$SubSubSubBucketMinDocCount;"time_zone"=$TimeZone;"offset"=$Offset}}
+                        }elseif($sssbt -eq "percentiles"){
+                            $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$subsubbucket_name.aggs.$this_subsubsubbucket_name=@{$sssbt = @{"field"= $SubSubSubBucketField;"percents" = $SubSubSubBucketPercents}}
+                        }else{
+                            $query.aggs.$bucket_name.aggs.$subbucket_name.aggs.$subsubbucket_name.aggs.$this_subsubsubbucket_name=@{$sssbt = @{"field"= $SubSubSubBucketField}}
+                        }
+                        $this_subsubsubbucket_number++
+
+                        if($SubSubSubBucketSortField){
+                            $tmp_subsubsubbucket_name = $($query.aggs.$tmp_bucket_name.aggs.$tmp_subbucket_name.aggs.$tmp_subsubbucket_name.aggs.Keys | select -first 1)
+                            $tmp_subsubsubbucket_type = $($query.aggs.$tmp_bucket_name.aggs.$tmp_subbucket_name.aggs.$tmp_subsubbucket_name.aggs.$tmp_subsubsubbucket_name.Keys | select -first 1)
+                            $query.aggs.$tmp_bucket_name.aggs.$tmp_subbucket_name.aggs.$tmp_subsubbucket_name.aggs.$tmp_subsubsubbucket_name.aggs.$tmp_subsubsubbucket_type.order = @{"$SubSubSubBucketSortField" = $SubSubSubBucketSortOrder}
+                        }
+                    }
+                }
+            }
         }
 
+    }elseif($AggregationJson){
+        $aggs = $null
+        $agg_conversion_failed = $false
+        try{
+            $aggs = $AggregationJson | ConvertFrom-Json
+        }catch{
+            $agg_conversion_failed = $True
+        }
+        if($aggs -eq $null -or $aggs.psobject.Properties.Count -ne 1 -or !$aggs.psobject.Properties.Name.Contains("aggs")){
+            $agg_conversion_failed = $True
+        }
+
+        if($agg_conversion_failed){
+            Write-Host -Debug -ForegroundColor Red @"
+            UNABLE TO CONVERT SUPPLIED AGGREGATION-STRING FROM JSON. `r`nMake sure it is a valid JSON string. First element must be 'aggs'. For Example:`r`n
+{
+  "aggs": {
+    "2": {
+      "date_histogram": {
+        "field": "@timestamp",
+        "calendar_interval": "1h",
+        "time_zone": "America/Chicago",
+        "min_doc_count": 1
+      },
+      "aggs": {
+        "3": {
+          "terms": {
+            "field": "source.ip",
+            "order": {
+              "1": "desc"
+            },
+            "size": 5,
+            "shard_size": 25
+          },
+          "aggs": {
+            "1": {
+              "cardinality": {
+                "field": "destination.port"
+              }
+            },
+            "4": {
+              "terms": {
+                "field": "destination.ip",
+                "order": {
+                  "1": "desc"
+                },
+                "size": 5,
+                "shard_size": 25,
+                "min_doc_count": 10
+              },
+              "aggs": {
+                "1": {
+                  "cardinality": {
+                    "field": "destination.port"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
-
-$code= @"
-        using System.Net;
-        using System.Security.Cryptography.X509Certificates;
-        public class TrustAllCertsPolicy : ICertificatePolicy {
-            public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem) {
-                return true;
-            }
-        }
+  }
+}
 "@
-if([system.type]::GetType("TrustAllCertsPolicy") -eq $bull){Add-Type -TypeDefinition $code -Language CSharp}
-[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-
-#   $query = @{query=@{query_string=@{query="user.name:SYSTEM"};filter=@(@{range=@{"@timestamp"=@{gte="now-90d/d";lte="now/d"}}})}}
-    $query_json = $query | ConvertTo-Json -Depth 10
-
-    if($DebugRequest){
-        Write-Host -Debug -ForegroundColor Yellow "$ElkRestURI/$ElkIndex/_search"
-        Write-Host -Debug -ForegroundColor Yellow ($headers | Out-String)
-        Write-Host -Debug -ForegroundColor Yellow $query_json
+            return
+        }else{
+            $query.aggs = $aggs.aggs
+        }
     }
-    $r = Invoke-RestMethod -Method Post -Uri "$ElkRestURI/$ElkIndex/_search" -Body $query_json -ContentType "application/json" -Headers $headers 
-    return $r
+    
+    if($ELKIndex){
+        $ElkUrl = "$ELKrestURI/$ELKIndex"
+    }else{
+        $ElkUrl = "$ELKrestURI"
+    }
 
-    #$r3 = Get-ElkRecords -ElkCredential $cred -ElkRestURI "https://elasticsearch.lan:9200" -ElkIndex "winlogbeat*" -NumDaysAgoStart 365 -BucketField "host.name" -BucketType terms -SubBucketField "host.ip" -SubBucketType terms -RecordCount 0 -ElkQuery 'host.ip:("75.161.0.0/24" OR "75.161.19.0/24" OR "75.161.99.1/24" OR "75.161.183.0/24" OR "142.202.1.9/24" OR "142.202.25.0/24" OR "142.202.62.0/24" OR "142.202.148.1/24" OR "142.202.110.0/24" OR "142.202.100.0/24" OR "68.50.10.0/24" OR "68.50.88.0/24" OR "68.50.6.0/24" OR "75.161.148.0/24")'
-    #$list = foreach ($bucket in ($r3.aggregations.buckets.buckets | ?{$_.key -match "\."})){$myip = $bucket.subbuckets.buckets.key | ?{$_ -notmatch "^(::1|127\.0\.0\.1|10\.|169\.254\.|1\.1\.|239\.255\.|224\.0)"} | select -First 1;$item = "" | Select asset_name,asset_type_name,asset_description,asset_ip,asset_domain,asset_tags; $item.asset_name ="$($bucket.key -split '\.' | select -First 1)"; $item.asset_domain = $(($bucket.key -split '\.' | select -Last 2) -join "."); $item.asset_ip=$myip; if($item.asset_name -match "[0-9]"){$item.asset_type_name = "Windows - Computer"}else{$item.asset_type_name="Windows - Server"}; $item}
-    #$list | Sort-Object -Property asset_name | ft -AutoSize
-    #$list | ConvertTo-Csv -NoTypeInformation | Out-File -Encoding ascii -FilePath .\dfir_asset-import.csv    
+    if($PointInTimeID){
+        $ElkUrl = "$ELKrestURI"
+    }
+
+    $search = "_search" #max_concurrent_shard_requests=10
+    
+    if($Scroll){
+        $search = "$($search)?scroll=15m"
+    }elseif($ScrollID){
+        $search = "$search/scroll"
+        $query = @{scroll="$($KeepAliveMinutes)m";scroll_id=$ScrollID}
+        $ElkUrl = "$ELKrestURI"
+    }
+
+    if($ELKQueryParameters){
+        foreach($param in $ELKQueryParameters){
+            if($search -match "\?"){
+                $search += "&$param"
+            }else{
+                $search += "?$param"
+            }
+        }
+    }
+
+    if($PointInTime){
+        $pit = Invoke-RestMethod "$ElkUrl/_pit?keep_alive=$($KeepAliveMinutes)m" -Method Post -Headers $headers -ContentType 'application/json' -TimeoutSec $TimeoutSec -ErrorAction SilentlyContinue #-UseBasicParsing  -ContentType 'application/json; charset=UTF-8'
+        $pit_id = $pit.id
+        $query.Add("pit",@{"id"=$pit_id;"keep_alive"="$($KeepAliveMinutes)m"})
+        $ElkUrl = $ElkUrl -replace "\/$($ELKIndex -replace '\*','\*').*",""
+    }elseif($PointInTimeID -and $PointInTimeSearchAfter){
+        $query.Add("pit",@{"id"=$PointInTimeID;"keep_alive"="$($KeepAliveMinutes)m"})
+        $query.Add("search_after",$PointInTimeSearchAfter)
+
+    }
+    $jsonquery = $query | ConvertTo-Json -Depth 15
+
+    if($DebugRequest){Write-Host -ForegroundColor Yellow -Debug "$ElkUrl/$search"}
+    if($DebugQuery){ Write-Host -Debug -ForegroundColor Yellow "$($headers | Out-String)`r`n$jsonquery"}
+    
+    try{
+        $response = Invoke-RestMethod "$ElkUrl/$search" -Method Post -Headers $headers -Body $jsonquery -ContentType 'application/json' -TimeoutSec $TimeoutSec #-UseBasicParsing
+    }catch{
+        #Write-Host -Debug -ForegroundColor Red $_.Exception.Message
+        #Write-Host -Debug -ForegroundColor Red $_.ErrorDetails.Message
+        #return $_
+        
+        if($_.Exception.Message -match "Bad Request" -and $_.ErrorDetails.Message -match "Unexpected character|x_content_parse_exception"){
+            if($verbose){Write-Host -ForegroundColor Yellow -Debug $_}
+            $jsonquery_unicode = $jsonquery
+            $jsonquery | sls "[^\x00-\x7F]" -AllMatches | % Matches | %{
+                $jsonquery_unicode = $jsonquery_unicode -replace $_.Value,$(ConvertTo-Unicode -char $_.Value)
+            }
+            if($DebugQuery){Write-Host -ForegroundColor Yellow -Debug "$ElkUrl/$search`r`n$headers`r`n$jsonquery_unicode"}
+            $response = Invoke-RestMethod "$ElkUrl/$search" -Method Post -Headers $headers -Body $jsonquery_unicode -ContentType 'application/json' -TimeoutSec $TimeoutSec #-UseBasicParsing
+        }else{
+            Write-Host -Debug -ForegroundColor Red $_.Exception.Message
+            Write-Host -Debug -ForegroundColor Red $_.ErrorDetails.Message
+        }
+    }
+    
+    if(!$response){return}
+
+    $trycount = 0
+    while(($response.GetType() -match "string") -and ($trycount -lt 4)){
+        $term = ''
+        try{
+            $response = $response | ConvertFrom-Json
+        }catch{
+            $errormessage = $_.Exception.Message 
+            if($errormessage -match "duplicated keys"){
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug $errormessage}
+                $term = $errormessage -replace "'","" -replace "\.",'' -split ' ' | select -Last 1
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug "replacing term: '$term'"}
+                if($term){$response = $response -replace $term.ToLower(),"$($term)_2"}
+                
+            }
+            $trycount++
+        }
+    }
+    return $response
 }
 
-function Add-ElkRecords{
-    param(
-        [pscredential]$ElkCredential,
-        [switch]$ElkCredentialIsAPIkey,
-        [string]$ElkIndex="powershell-records",
-        [string]$ElkRestURI="https://elasticsearch.lan:9200",
-        [Parameter(ParameterSetName = 'json')][string]$recordJson,
-        [Parameter(ParameterSetName = 'hashtable')] [hashtable]$recordHashtable,
-        [string]$TimeField="@timestamp",
-        [string]$FormatTimeField="",
-        [switch]$NoTimeField,
-        [switch]$DebugRequest
-
+function Get-ELKRecordCount{
+     param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:9200",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [string]$ELKQueryParameters="",
+        [Parameter(Mandatory=$false)] [string]$ELKIndex="hunt*",
+        [Parameter(Mandatory=$false)] [string]$ELKQuery='*',
+        [Parameter(Mandatory=$false,ParameterSetName="Minutes")]   [int]$numMinutesAgoStart=60,
+        [Parameter(Mandatory=$false,ParameterSetName="Minutes")]   [int]$numMinutesAgoEnd=0,
+        [Parameter(Mandatory=$True,ParameterSetName="Hours")]      [int]$numHoursAgoStart,
+        [Parameter(Mandatory=$false,ParameterSetName="Hours")]     [int]$numHoursAgoEnd,
+        [Parameter(Mandatory=$True,ParameterSetName="Days")]       [int]$numDaysAgoStart,
+        [Parameter(Mandatory=$false,ParameterSetName="Days")]      [int]$numDaysAgoEnd,
+        [Parameter(Mandatory=$True,ParameterSetName="exactTime")]  [datetime]$startTime,
+        [Parameter(Mandatory=$false,ParameterSetName="exactTime")] [datetime]$endTime,
+        [Parameter(Mandatory=$false)] [string]$TimeField = "@timestamp",
+        [Parameter(Mandatory=$false)] [switch]$NoTimeField,
+        [Parameter(Mandatory=$false)] [switch]$IncludeSource,
+        [Parameter(Mandatory=$false)] [bool]$AnalyzeWildcards=$True,
+        [Parameter(Mandatory=$false)] [int]$TimeoutSec=0,
+        [Parameter(Mandatory=$false)] [switch]$DebugQuery,
+        [Parameter(Mandatory=$false)] [switch]$DebugRequest
     )
+    if(!$ElkCredential){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    if($ELKIndex -match "^hunt"){$TimeField = "event_time"}
+    
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+    
+    $start = ""
+    $end=""
+
+    if($startTime -or $endTime){
+        if(!$endTime){$endTime = Get-Date}
+        if(!$startTime){$startTime = (Get-Date).AddYears(-1)}
+        [string]$start = $startTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+        [string]$end = $endTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+    }elseif($numHoursAgoStart -or $numHoursAgoEnd){
+        $interval = "h"
+        [string]$start = "now-$($numHoursAgoStart)$interval"
+        [string]$end = "now-$($numHoursAgoEnd)$interval"
+    }elseif($numDaysAgoStart -or $numDaysAgoEnd){
+        $interval = "d"
+        [string]$start = "now-$($numDaysAgoStart)$interval"
+        [string]$end = "now-$($numDaysAgoEnd)$interval"
+    }else{
+        $interval = "m"
+        [string]$start = "now-$($numMinutesAgoStart)$interval"
+        [string]$end = "now-$($numMinutesAgoEnd)$interval"
+    }
+
+    $query = @{query = @{bool = @{must = @(@{query_string = @{query = $ELKQuery; analyze_wildcard=$AnalyzeWildcards}});filter = @{range = @{$TimeField = @{gte = $start; lt = $end}}}}};}
+    if($NoTimeField){
+        $query = @{query = @{bool = @{must = @(@{query_string = @{query = $ELKQuery; analyze_wildcard=$AnalyzeWildcards}})}}}
+        if(!$IncludeSource){
+            $query.Add('_source',$false)
+        }
+    }
+
+    $jsonquery = $query | ConvertTo-Json -Depth 15
+
+    $ElkUrl = "$ELKrestURI/$ELKIndex"
+
+    $search = "_count" 
+    if($ELKQueryParameters){
+        $ELKQueryParameters = $ELKQueryParameters -replace "^\?",""
+        $search += "?"+$ELKQueryParameters
+    }
+    
+    if($DebugRequest){Write-Host -ForegroundColor Yellow -Debug "$ElkUrl/$search"}
+    if($DebugQuery){ Write-Host -Debug -ForegroundColor Yellow "$($headers | Out-String)`r`n$jsonquery"}
+    try{
+        $response = Invoke-RestMethod "$ElkUrl/$search" -Method Post -Headers $headers -Body $jsonquery -ContentType 'application/json' -TimeoutSec $TimeoutSec #-UseBasicParsing
+    }catch{
+        if($_.Exception.Message -match "Bad Request" -and $_.ErrorDetails.Message -match "Unexpected character|x_content_parse_exception"){
+            if($verbose){Write-Host -ForegroundColor Yellow -Debug $_}
+            $jsonquery_unicode = $jsonquery
+            $jsonquery | sls "[^\x00-\x7F]" -AllMatches | % Matches | %{
+                $jsonquery_unicode = $jsonquery_unicode -replace $_.Value,$(ConvertTo-Unicode -char $_.Value)
+            }
+            if($DebugQuery){Write-Host -ForegroundColor Yellow -Debug "$ElkUrl/$search`r`n$headers`r`n$jsonquery_unicode"}
+            $response = Invoke-RestMethod "$ElkUrl/$search" -Method Post -Headers $headers -Body $jsonquery_unicode -ContentType 'application/json' -TimeoutSec $TimeoutSec #-UseBasicParsing
+        }else{
+            Write-Host -Debug -ForegroundColor Red $_.Exception.Message
+            Write-Host -Debug -ForegroundColor Red $_.ErrorDetails.Message
+        }
+    }
+    
+    if(!$response){return}
+
+    $trycount = 0
+    while(($response.GetType() -match "string") -and ($trycount -lt 4)){
+        $term = ''
+        try{
+            $response = $response | ConvertFrom-Json
+        }catch{
+            $errormessage = $_.Exception.Message 
+            if($errormessage -match "duplicated keys"){
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug $errormessage}
+                $term = $errormessage -replace "'","" -replace "\.",'' -split ' ' | select -Last 1
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug "replacing term: '$term'"}
+                if($term){$response = $response -replace $term.ToLower(),"$($term)_2"}
+                
+            }
+            $trycount++
+        }
+    }
+    return $response
+}
+
+function Update-ELKRecord{
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] [string]$ELKrestURI = "http://localhost:9200",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$true)]  [string]$ELKIndex="",
+        [Parameter(Mandatory=$false)] [string]$documentType="_update",
+        [Parameter(Mandatory=$true,ParameterSetName="hashtable")]  [hashtable]$record,
+        [Parameter(Mandatory=$true,ParameterSetName="json")]  [string]$recordJson,
+        [Parameter(Mandatory=$false)] [datetime]$recordDate,
+        [Parameter(Mandatory=$true)]  [string]$recordId
+    )
+    if(!$ElkCredential -or $ELKcredential -eq $null -or $ELKcredential -eq "" -or $ELKcredential.GetType() -notmatch "credential"){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
 
     # Convert creds to Base64
     $unsecureCreds = $ElkCredential.GetNetworkCredential()
     $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
     Remove-Variable unsecureCreds
 
-    if($ElkCredentialIsAPIkey){
-        $authHeader = "ApiKey $base64AuthInfo"
+    if($ElkCredentialIsAPIKey){
+        $headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo)}
     }else{
-        $authHeader = "Basic $base64AuthInfo"
+        $headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)}
     }
-    $code= @"
-        using System.Net;
-        using System.Security.Cryptography.X509Certificates;
-        public class TrustAllCertsPolicy : ICertificatePolicy {
-            public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem) {
-                return true;
+
+    $fullURI = "$ELKrestURI/$ELKIndex/$documentType/$recordId"
+
+    $body = @{doc=$record}
+
+    if($pscmdlet.ParameterSetName -match "Hashtable"){
+        $response = Invoke-RestMethod -Uri $fullURI -Method Post -Headers $headers -Body $($body.psobject.BaseObject | ConvertTo-Json -Depth 15) -ContentType 'application/json'
+    }else{
+        $response = Invoke-RestMethod -Uri $fullURI -Method Post -Headers $headers -Body $recordJson -ContentType 'application/json'
+    }
+    return $response
+}
+
+function Get-ElkSavedObjectByName{
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] [string]$search="*",
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:5601",
+        [Parameter(Mandatory=$false)] [string]$ElkSpace="",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [ValidateSet("visualization", "dashboard", "search", "index-pattern")] [string]$ObjectType='index-pattern',
+        [Parameter(Mandatory=$false)] [string]$SearchFields='title',
+        [Parameter(Mandatory=$false)] [string]$ElkrestAPIendpoint='api/saved_objects/_find?',
+        [Parameter(Mandatory=$false)] [int]$PageSize=3000
+    )
+    if(!$ElkCredential -or $ELKcredential -eq $null -or $ELKcredential -eq "" -or $ELKcredential.GetType() -notmatch "credential"){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+    
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    $ElkUrl = "$ELKrestURI$ElkSpace/$($ElkrestAPIendpoint)type=$($ObjectType)&search_fields=$($SearchFields)&search=$search&per_page=$PageSize"
+    Write-Host -Debug -ForegroundColor Yellow $ElkUrl
+
+    $response = Invoke-RestMethod $ElkUrl -Method Get -Headers $headers -ContentType 'application/json' #-UseBasicParsing
+
+    if(!$response){return}
+
+    $trycount = 0
+    while(($response.GetType() -match "string") -and ($trycount -lt 4)){
+        $term = ''
+        try{
+            $response = $response | ConvertFrom-Json
+        }catch{
+            $errormessage = $_.Exception.Message 
+            if($errormessage -match "duplicated keys"){
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug $errormessage}
+                $term = $errormessage -replace "'","" -replace "\.",'' -split ' ' | select -Last 1
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug "replacing term: '$term'"}
+                if($term){$response = $response -replace $term.ToLower(),"$($term)_2"}
+                
+            }
+            $trycount++
+        }
+    }
+    return $response
+}
+
+function Get-ElkSavedObjectByID{
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$true)] [string]$id,
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:5601",
+        [Parameter(Mandatory=$false)] [string]$ElkSpace="",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [ValidateSet("visualization", "dashboard", "search", "index-pattern")] [string]$ObjectType='index-pattern',
+        [Parameter(Mandatory=$false)] [string]$ElkrestAPIendpoint='api/saved_objects'
+    )
+    if(!$ElkCredential -or $ELKcredential -eq $null -or $ELKcredential -eq "" -or $ELKcredential.GetType() -notmatch "credential"){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json; charset=utf-8'; Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json; charset=utf-8'; Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    $ElkUrl = "$ELKrestURI$ElkSpace/$ElkrestAPIendpoint/$ObjectType/$id"
+    #$ElkUrl = "$ELKrestURI/$ElkSpace/$ElkrestAPIendpoint/resolve/$ObjectType/$id"
+
+    $response = Invoke-RestMethod $ElkUrl -Method Get -Headers $headers -ContentType 'application/json; charset=utf-8' #-UseBasicParsing
+
+    if(!$response){return}
+
+    $trycount = 0
+    while(($response.GetType() -match "string") -and ($trycount -lt 4)){
+        $term = ''
+        try{
+            $response = $response | ConvertFrom-Json
+        }catch{
+            $errormessage = $_.Exception.Message 
+            if($errormessage -match "duplicated keys"){
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug $errormessage}
+                $term = $errormessage -replace "'","" -replace "\.",'' -split ' ' | select -Last 1
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug "replacing term: '$term'"}
+                if($term){$response = $response -replace $term.ToLower(),"$($term)_2"}
+                
+            }
+            $trycount++
+        }
+    }    
+    return $response
+}
+
+function Update-ElkSavedObjectByID{
+    #https://www.elastic.co/guide/en/kibana/7.16/saved-objects-api-update.html
+    #$v = Get-ElkSavedObjectByName -ObjectType visualization
+    #$results = $v.saved_objects | where {$_.references.id -match "hunt-*"} | %{Write-host -Debug -ForegroundColor Green "$($_.id) - $($_.attributes.title)";foreach($ref in $_.references){if($ref.id -match "hunt-*"){$newref = $ref | ConvertTo-Hashtable; $newref.id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"; Update-ElkSavedObjectByID -id $_.id -ObjectType visualization -body $(@{references=@($newref)}); Write-Host -Debug -ForegroundColor Cyan $ref}}}
+    #$s = Get-ElkSavedObjectByName -ObjectType search
+    #$results = $s.saved_objects | where {$_.references.id -match "hunt-*"} | %{Write-host -Debug -ForegroundColor Green "$($_.id) - $($_.attributes.title)";foreach($ref in $_.references){if($ref.id -match "hunt-*"){$newref = $ref | ConvertTo-Hashtable; $newref.id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"; Update-ElkSavedObjectByID -id $_.id -ObjectType search -body $(@{references=@($newref)}); Write-Host -Debug -ForegroundColor Cyan $ref}}}
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$true)] [string]$id,
+        [Parameter(Mandatory=$true)] [hashtable]$body,
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:5601",
+        [Parameter(Mandatory=$false)] [string]$ElkSpace="s/ctoc",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [ValidateSet("visualization", "dashboard", "search", "index-pattern")] [string]$ObjectType='search',
+        [Parameter(Mandatory=$false)] [string]$ElkrestAPIendpoint='api/saved_objects'
+    )
+    if(!$ElkCredential -or $ELKcredential -eq $null -or $ELKcredential -eq "" -or $ELKcredential.GetType() -notmatch "credential"){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    if(!$body.ContainsKey("attributes")){
+        $tmp = Get-ElkSavedObjectByID -id $id -ELKrestURI $ELKrestURI -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ElkCredentialIsAPIKey -ObjectType $ObjectType -ElkrestAPIendpoint $ElkrestAPIendpoint
+        $body.Add("attributes", $tmp[0].attributes)
+    }
+
+    $ElkUrl = "$ELKrestURI/$ElkSpace/$ElkrestAPIendpoint/$ObjectType/$id"
+    
+    $response = Invoke-RestMethod $ElkUrl -Method Put -Headers $headers -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 10) #-UseBasicParsing
+
+    if(!$response){return}
+
+    $trycount = 0
+    while(($response.GetType() -match "string") -and ($trycount -lt 4)){
+        $term = ''
+        try{
+            $response = $response | ConvertFrom-Json
+        }catch{
+            $errormessage = $_.Exception.Message 
+            if($errormessage -match "duplicated keys"){
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug $errormessage}
+                $term = $errormessage -replace "'","" -replace "\.",'' -split ' ' | select -Last 1
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug "replacing term: '$term'"}
+                if($term){$response = $response -replace $term.ToLower(),"$($term)_2"}
+                
+            }
+            $trycount++
+        }
+    }
+    return $response
+}
+
+function Add-ElkShortUrl{
+    #https://github.com/elastic/kibana/issues/12840
+    #https://cinhtau.de/2022/04/11/kibana-shorturls/
+    #https://observablehq.com/@nyurik/kibana-url-parser
+    #https://discuss.elastic.co/t/kibana-g-and-a-parameters-in-the-dashboards-url-string/264642
+    #https://www.elastic.co/guide/en/kibana/current/short-urls-api-create.html
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] [string]$ELKrestURI = "http://localhost:5601",
+        [Parameter(Mandatory=$false)] [string]$ELKSpace = "", 
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [string]$ElkrestAPIendpoint='api/short_url',
+        [Parameter(Mandatory=$false)] [ValidateSet("GET","PUT","POST","DELETE", "HEAD")] [string]$ElkRestMethod="POST",
+        [Parameter(Mandatory=$false)] [string]$ElkApp='discover',
+        [Parameter(Mandatory=$false)] [string]$HumanReadableSlug=((45..46)+(48..57)+(65..90)+(95)+(97..122) | Get-Random -count 42 | %{[char]$_}) -join '',
+        [Parameter(Mandatory=$false)] [string[]]$ElkFiltersGlobal=@(),
+        [Parameter(Mandatory=$false)] [string[]]$ElkFiltersApp=@(),
+        [Parameter(Mandatory=$false)] [string]$ElkIndex='',
+        [Parameter(Mandatory=$false)] [string[]]$ElkFields=@(),
+        [Parameter(Mandatory=$false)] [string]$ElkTimeFrom='now-24h/h',
+        [Parameter(Mandatory=$false)] [string]$ElkTimeTo='now',
+        [Parameter(Mandatory=$false)] [bool]$ElkChartHide=$false,
+        [Parameter(Mandatory=$false)] [string]$ElkChartInterval='auto',
+        [Parameter(Mandatory=$false)] [int]$ElkRefreshIntervalSeconds=0,
+        [Parameter(Mandatory=$false)] [bool]$ElkRefreshPause=$true,
+        [Parameter(Mandatory=$false)] [string]$ElkQuery='',
+        [Parameter(Mandatory=$false)] [hashtable]$ElkSortFields=@{'@timestamp'="desc"},
+        [Parameter(Mandatory=$false,ParameterSetName="LongUrl")] [string]$ElkLongUrl='',
+        [Parameter(Mandatory=$false)] [switch]$DebugRequest,
+        [Parameter(Mandatory=$false)] [switch]$DebugQuery
+    )
+    if(!$ElkCredential -or $ELKcredential -eq $null -or $ELKcredential -eq "" -or $ELKcredential.GetType() -notmatch "credential"){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    If($ELKSpace){
+        $ElkUrl = "$ELKrestURI$ELKSpace"
+    }else{
+        $ElkUrl = "$ELKrestURI"
+    }
+
+    $url_trailer = ""
+    if($PSCmdlet.ParameterSetName -eq "LongUrl"){
+        $url_trailer = $ElkLongUrl
+    }else{
+        $app_str = "app/$ElkApp#"
+        
+        $filters_global_str = "filters:!($($ElkFiltersGlobal -join ','))"
+        
+        if($ElkRefreshPause){$pause = "!t"}else{$pause="!f"}
+        $refresh_str = "refreshInterval:(pause:$pause,value:$($ElkRefreshIntervalSeconds * 1000))"
+
+        #$time_str = "time:(from:$([System.Web.HttpUtility]::UrlEncode($ElkTimeFrom)),to:$([System.Web.HttpUtility]::UrlEncode($ElkTimeTo)))"
+        if($ElkTimeFrom -match "now"){
+            $time_str1 = $ElkTimeFrom
+        }else{
+            $time_str1 = "'$ElkTimeFrom'"
+        }
+        if($ElkTimeTo -match "now"){
+            $time_str2 = $ElkTimeTo
+        }else{
+            $time_str2 = "'$ElkTimeTo'"
+        }
+        $time_str = "time:(from:$time_str1,to:$time_str2)"
+        
+        for($i =0;$i -lt $ElkFields.Count;$i++){if($ElkFields[$i] -match "(\s)" -and $ElkFields[$i] -notmatch "^'.*'$"){$ElkFields[$i] = "'$($ElkFields[$i])'"}}
+
+        $columns_str = "columns:!($(($ElkFields | % {[System.Web.HttpUtility]::UrlEncode($_)}) -join ','))"
+
+        $filters_app_str = "filters:!($($ElkFiltersApp -join ','))"
+
+        if($ElkChartHide){$hidechart_str = "hideChart:!t"}else{$hidechart_str = "hideChart:!f"}
+
+        if($ElkIndex -match "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{10}"){
+            $index_str = "index:'$ElkIndex'"
+        }else{
+            $index_id = $(Get-ElkSavedObjectByName -search $ElkIndex -ObjectType index-pattern -ELKrestURI $ELKrestURI -ElkSpace $ELKSpace -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ElkCredentialIsAPIKey | % saved_objects | where {$_.attributes.name -eq $ElkIndex} | select -First 1 | % id)
+            if(!$index_id){
+                $index_id = $(Get-ElkSavedObjectByName -search $ElkIndex -ObjectType index-pattern -ELKrestURI $ELKrestURI -ElkSpace $ELKSpace -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ElkCredentialIsAPIKey | % saved_objects | where {$_.attributes.title -eq $ElkIndex} | select -First 1 | % id)
+            }
+            $index_str = "index:'$index_id'"
+            if(!$index_id -or $index_id -eq ""){Write-Host -Debug -ForegroundColor Yellow "ERROR RESOLVING INDEX-PATTERN"; return}
+        }
+
+        $interval_str = "interval:$ElkChartInterval"
+
+        $query_str = "query:(language:lucene,query:'$([System.Web.HttpUtility]::UrlEncode($ElkQuery))')"
+
+        [string[]]$tmp_sort_str = [string[]]""
+        [string[]]$tmp_sort_str = foreach ($field in $ElkSortFields.GetEnumerator()){
+            if($field.key -match ""){
+                "!('$($field.key)',$($field.value))"
+            }else{
+                "!($($field.key),$($field.value))"
             }
         }
-"@
-    if([system.type]::GetType("TrustAllCertsPolicy") -eq $bull){Add-Type -TypeDefinition $code -Language CSharp}
-    [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-    
-    $headers = @{authorization=$authHeader;"content-type"="application/json"}
+        $sort_str = "sort:!(" +($tmp_sort_str -join ',') + ")"
+        
+        $url_trailer = "/$app_str/?_g=($filters_global_str,$refresh_str,$time_str)&_a=($columns_str,$filters_app_str,$hidechart_str,$index_str,$interval_str,$query_str,$sort_str)"
 
-    $bodyJson = ""
-    if($recordHashtable){
-        $bodyJson = $recordHashtable | ConvertTo-Json -Depth 10
-    }else{
-        $bodyJson = $recordJson.Clone()
+        $body = @{locatorId="LEGACY_SHORT_URL_LOCATOR";params=@{url=$url_trailer}}
+        if($HumanReadableSlug -and $HumanReadableSlug -ne "" -and $HumanReadableSlug.Length -ge 3 -and $HumanReadableSlug.Length -le 255 -and $HumanReadableSlug -match "^[A-Za-z0-9\-\._]+$"){
+            $body.Add("humanReadableSlug",$true)
+            $body.Add("slug",$HumanReadableSlug)
+        }else{
+            Write-Host -Debug -ForegroundColor Yellow "Invalid slug: $HumanReadableSlug"
+        }
+
+        #The data in the URL parameters is the application state that has been encoded in "Rison" format. The _a parameter is "app state" and the _g parameter is "global state", which is state that moves between apps with you (such as pinned filters).
+        #RISON Encoding  https://github.com/Nanonid/rison
+        #You can use a tool such as the following to make sense of the data: https://observablehq.com/@nyurik/kibana-url-parser
+        #$url_trailer = $ElkUrl+"/$app_str/?_g="
     }
-
-    if($FormatTimeField){
-        $tmp = $null
-        #$tmp = Get-Date $bodyJson | ConvertFrom-Json | % 
+    if($DebugQuery){
+        Write-Host -Debug -ForegroundColor Yellow $ElkUrl
+        Write-Host -Debug -ForegroundColor Yellow $($body | ConvertTo-Json -Depth 10 | Out-String)
     }
-
     if($DebugRequest){
-        Write-Host -Debug -ForegroundColor Yellow "$ElkRestURI/$ElkIndex/_search"
-        Write-Host -Debug -ForegroundColor Yellow ($headers | Out-String)
-        Write-Host -Debug -ForegroundColor Yellow $query_json
+        Write-Host -Debug -ForegroundColor Yellow "$ElkrestMethod $ElkUrl/$ElkrestAPIendpoint"
     }
-    $r = Invoke-RestMethod -Method Post -Uri "$ElkRestURI/$ElkIndex/_doc" -Body $bodyJson -ContentType "application/json" -Headers $headers 
-    return $r
+    $response = Invoke-RestMethod "$ElkUrl/$ElkrestAPIendpoint" -Method $ElkrestMethod -Headers $headers -ContentType 'application/json' -Body $($body | ConvertTo-Json -Depth 10)
+    $response | Add-Member -MemberType NoteProperty -Name "short_url" -Value ("$ElkUrl/app/r/s/$($response.slug)")
+    $response | Add-Member -MemberType NoteProperty -Name "goto_url" -Value ("$ElkUrl/goto/$($response.id)")
+    $response | Add-Member -MemberType NoteProperty -Name "long_url" -Value ("$ElkUrl/$url_trailer")
+    return $response
 }
 
-function Export-ElkHostname2IPMapping{
+function Get-ElkAPI{
     param(
-        [string]$DefendedAssetListFile="",
-        [pscredential]$ElasticCredential,
-        [string]$BucketField="host.name",
-        [string]$SubBucketField="host.ip",
-        [string]$IPExclusionRegex= "^(::1|127\.0\.0\.1|10\.|169\.254\.|1\.1\.|239\.255\.|224\.0)",
-        [string]$OutFile = ".\hostname2IP_dfir_import.csv",
-        [int]$numDaysAgoStart=365
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false,ParameterSetName="Hashtable")] [hashtable]$ELKbody,
+        [Parameter(Mandatory=$false,ParameterSetName="RawJson")] [string]$ELKbodyJson,
+        [Parameter(Mandatory=$false)] [string]$ELKrestURI = "http://localhost:5601",
+        [Parameter(Mandatory=$false)] [string]$ELKSpace = "", 
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [string]$ElkrestAPIendpoint='api/saved_objects/_find?',
+        [Parameter(Mandatory=$false)] [ValidateSet("GET","PUT","POST","DELETE", "HEAD")] [string]$ElkrestMethod="GET"
     )
-    if(Test-Path -LiteralPath $DefendedAssetListFile -PathType Leaf ){
-        $DAL = (gc -LiteralPath $DefendedAssetListFile ) -join '" OR "'
+    if(!$ElkCredential -or $ELKcredential -eq $null -or $ELKcredential -eq "" -or $ELKcredential.GetType() -notmatch "credential"){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
     }
-    if(!$ElasticCredential){
-        $ElasticCredential = Get-Credential -Message "Provide elastic credentials. Username is likely 'elastic'"
-    }
-    $query = $('host.ip:("' + $DAL + '")') 
-    Write-Host -Debug -ForegroundColor Yellow $query
-    $ElkQuery = Get-ElkRecords -ElkCredential $cred -ElkRestURI "https://elasticsearch.lan:9200" -ElkIndex "winlogbeat*" -NumDaysAgoStart $numDaysAgoStart -BucketField $BucketField -BucketType terms -SubBucketField $SubBucketField -SubBucketType terms -RecordCount 0 -ElkQuery $query
-    $list = foreach ($bucket in ($ElkQuery.aggregations.buckets.buckets | ?{$_.key -match "\."})){$myip = $bucket.subbuckets.buckets.key | ?{$_ -notmatch $IPExclusionRegex} | select -First 1;$item = "" | Select asset_name,asset_type_name,asset_description,asset_ip,asset_domain,asset_tags; $item.asset_name ="$($bucket.key -split '\.' | select -First 1)"; $item.asset_domain = $(($bucket.key -split '\.' | select -Last 2) -join "."); $item.asset_ip=$myip; if($item.asset_name -match "[0-9]"){$item.asset_type_name = "Windows - Computer"}else{$item.asset_type_name="Windows - Server"}; $item}
-    $list | Sort-Object -Property asset_name | ft -AutoSize
-    $list | ConvertTo-Csv -NoTypeInformation | Out-File -Encoding ascii -FilePath $OutFile
-    Write-Host "CSV file written to $OutFile"
-}
 
-function Get-Sysmon4LinuxParsed{
-    # ex:   $cred = Get-Credential
-    # ex:   Get-Sysmon4LinuxParsed -ElkCredential $cred -DestinationIndex "auto-linux-sysmon" -StartDate (Get-date "2024-04-03T00:00:00Z") -EndDate (Get-date "2024-04-07T00:00:00Z")
-    param(
-        [pscredential]$ElkCredential,
-        [string]$LinuxHostname="",
-        [string]$SourceHostFieldName="host.hostname",
-        [string]$SourceIndex="filebeat-*",
-        [string]$SourceQuery='process.name:sysmon AND NOT _exists_:error.message AND NOT message:("eventid 5 eventid" OR "CommandLine>cp --parents ./elastic" )',
-        [string]$SourceMessageIncludeRegex="\<EventID\>1\<\/EventID\>",
-        [string]$SourceMessageExcludeRegex="(/usr/share/auditbeat/bin/auditbeat|cp --parents ./elastic-agent-8.8.2-linux-x86_64/|/usr/share/filebeat/bin/filebeat --environment systemd -c /etc/filebeat/filebeat.yml|Data Name=.CommandLine.\>(/usr/bin/python3|chmod u\+x|rm -f -r) /home/webuser/.ansible/tmp/ansible-tmp-|(bash -c )?/usr/lib/openssh/sftp-server|/usr/lib/systemd/system-generators/systemd-)",
-        [string]$DestinationIndex="linux-sysmon",
-        [string]$DestinationHostFieldName="hostname",
-        [datetime]$StartDate=(Get-Date).AddDays(-30),
-        [datetime]$EndDate=(Get-Date),
-        [int]$MaxRecordBatchSize=10000, #10000 is the ELK REST API max
-        [int]$DefaultMinutesInterval=360,
-        [double]$DefaultBackoffInterval=0.75,
-        [double]$DefaultExpandInterval=2.0,
-        [double]$DefaultExpandMinimumThreshold=0.45
-    )
-    if(!$ElkCredential){
-        $ElkCredential = Get-Credential -Message "Provide elastic credentials. Username is likely 'elastic'"
-    }
-    
-    $final_query = $SourceQuery
-    if($LinuxHostname -ne ""){
-        $final_query = "host.hostname:`"$LinuxHostname`" AND "+$SourceQuery
-    }
-    
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
 
-    $hitcount = 0
-    $curr_start = $StartDate
-    $curr_interval = $DefaultMinutesInterval
-
-    $results = Get-ElkRecords -ElkCredential $ElkCredential -ElkIndex $SourceIndex -ElkQuery $final_query -startTime $curr_start -endTime $curr_start.AddMinutes($curr_interval)
-    $hitcount = $results.hits.total.value
-
-    if($hitcount -ge 10000){
-        Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
-    }elseif($hitcount -eq 0){
-        Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+    if($ElkCredentialIsAPIKey){
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("ApiKey {0}" -f $base64AuthInfo)}
     }else{
-        Write-Host -Debug -ForegroundColor Magenta "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("Basic {0}" -f $base64AuthInfo)}
     }
 
-    #$curr_end = $EndDate
-    while($curr_start -lt $EndDate){
-        while($hitcount -eq 0){
-            $curr_start = $curr_start.AddMinutes($curr_interval)
-            $results = Get-ElkRecords -ElkCredential $ElkCredential -ElkIndex $SourceIndex -ElkQuery $final_query -startTime $curr_start -endTime $curr_start.AddMinutes($curr_interval)
-            $hitcount = $results.hits.total.value
-            
-            if($curr_start.AddMinutes($curr_interval) -gt $EndDate){
-                Write-Host "Reached End Date without finding any records. Exiting!"
-                return
-            }
+    If($ELKSpace){
+        $ElkUrl = "$ELKrestURI/$ELKSpace/$($ElkrestAPIendpoint)"
+    }else{
+        $ElkUrl = "$ELKrestURI/$($ElkrestAPIendpoint)"
+    }
+    Write-Host -Debug -ForegroundColor Yellow $ElkUrl
 
-            if($hitcount -ge 10000){
-                Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
-            }elseif($hitcount -eq 0){
-                Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+    if($ELKbody){
+        $response = Invoke-RestMethod $ElkUrl -Method $ElkrestMethod -Headers $headers -ContentType 'application/json' -Body $($ELKbody | ConvertTo-Json -Depth 10)
+    }elseif($ELKbodyJson){
+        $response = Invoke-RestMethod $ElkUrl -Method $ElkrestMethod -Headers $headers -ContentType 'application/json' -Body $ELKbodyJson
+    }else{
+        $response = Invoke-RestMethod $ElkUrl -Method $ElkrestMethod -Headers $headers -ContentType 'application/json' #-UseBasicParsing
+    }
+
+    if(!$response){return}
+
+    $trycount = 0
+    while(($response.GetType() -match "string") -and ($trycount -lt 4)){
+        $term = ''
+        try{
+            $response = $response | ConvertFrom-Json
+        }catch{
+            $errormessage = $_.Exception.Message 
+            if($errormessage -match "duplicated keys"){
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug $errormessage}
+                $term = $errormessage -replace "'","" -replace "\.",'' -split ' ' | select -Last 1
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug "replacing term: '$term'"}
+                if($term){$response = $response -replace $term.ToLower(),"$($term)_2"}
+                
+            }
+            $trycount++
+        }
+    }
+    return $response
+}
+
+function Get-ElkMapping{
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] [ValidateSet("https://elkquery6.usaa.com:9200", "https://darkweasel.es.vpce.us-east-1.aws.elastic-cloud.com","https://mixacoatld.usaa.com:9208","https://bacchusd.usaa.com:9204","https://charond.usaa.com:9202","https:/jibrild.usaa.com:9212","https://osirisd.usaa.com:9201","https://perseusd.usaa.com:9205","https://phyxiusd.usaa.com:9214","https://serenityd.usaa.com:9206","https://terpsichored.usaa.com:9209","https://tontond.usaa.com:9207","https://soteriad.usaa.com:9200","https://testcso101lsat.usaa.com:9200","https://testsntesm001lsat.usaa.com:9200","https://test-security-windows-1.es.us-east-1.aws.found.io")] $ELKrestURI = "http://localhost:9200",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [string]$ELKIndex="ls-wlbsysmon"
+    )
+    
+    if(!$ElkCredential){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+    
+    $response = Invoke-RestMethod "$ELKrestURI/$ELKIndex/_mapping" -Method Get -Headers $headers -ContentType 'application/json'
+    
+    return $response
+}
+
+function Get-ELKShortURL{
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$true, ParameterSetName="GUID")] [string]$guid,
+        [Parameter(Mandatory=$true, ParameterSetName="SLUG")] [string]$slug,
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:5601",
+        [Parameter(Mandatory=$false)] [string]$ElkSpace = "",
+        [Parameter(Mandatory=$false)] $ELKRestEndpoint = "api/short_url",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey
+    )
+    if(!$ElkCredential -or $ELKcredential -eq $null -or $ELKcredential -eq "" -or $ELKcredential.GetType() -notmatch "credential"){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{'kbn-xsrf'=$true; 'Content-Type'= 'application/json'; Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    if($slug){
+        $ElkUrl = "$ELKrestURI/$ElkSpace/$ELKRestEndpoint/_slug/$slug"
+    }else{
+        $ElkUrl = "$ELKrestURI/$ElkSpace/$ELKRestEndpoint/$guid"
+    }
+
+    $response = Invoke-RestMethod $ElkUrl -Method Get -Headers $headers -ContentType 'application/json' #-UseBasicParsing
+
+    if(!$response){return}
+
+    $trycount = 0
+    while(($response.GetType() -match "string") -and ($trycount -lt 4)){
+        $term = ''
+        try{
+            $response = $response | ConvertFrom-Json
+        }catch{
+            $errormessage = $_.Exception.Message 
+            if($errormessage -match "duplicated keys"){
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug $errormessage}
+                $term = $errormessage -replace "'","" -replace "\.",'' -split ' ' | select -Last 1
+                if($verbose){Write-Host -ForegroundColor Yellow -Debug "replacing term: '$term'"}
+                if($term){$response = $response -replace $term.ToLower(),"$($term)_2"}
+                
+            }
+            $trycount++
+        }
+    }
+    return $response
+}
+
+function Get-AnalyzedText{
+     param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] [string]$Text="The quick brown-fox jumps over the lazy_dog's house. House\.\quick-fox.exe lazy_dog.house_1.exe",
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:9200",
+        [Parameter(Mandatory=$false)] [string]$ElkIndex="",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [ValidateSet("standard", "keyword")] [string]$Analyzer="standard",
+        [Parameter(Mandatory=$false)] [switch]$ReturnRawResponse
+    )
+    if(!$ElkCredential -or $ELKcredential -eq $null -or $ELKcredential -eq "" -or $ELKcredential.GetType() -notmatch "credential"){
+        $ElkCredential = Get-Credential -Message "Provide ELK Credential" -UserName $env:USERNAME
+        $prompt = Read-Host -Prompt "Is this credential an API Key (y/N)?"
+        if($prompt -match "^y"){$ElkCredentialIsAPIKey = $True}
+    }
+
+    # Convert creds to Base64
+    $unsecureCreds = $ElkCredential.GetNetworkCredential()
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $unsecureCreds.UserName,$unsecureCreds.Password)))
+    Remove-Variable unsecureCreds
+
+    if($ElkCredentialIsAPIKey){
+        $headers = @{Authorization=("ApiKey {0}" -f $base64AuthInfo)}
+    }else{
+        $headers = @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+    }
+
+    $body = @{analyzer=$Analyzer;text=$Text} 
+    $index = ""; if($ElkIndex){$index= "/$ElkIndex"}
+    $response = Invoke-RestMethod "$ELKrestURI$index/_analyze" -Method Post -Headers $headers -Body $($body.psobject.BaseObject | ConvertTo-Json -Depth 10) -ContentType 'application/json'
+    if($ReturnRawResponse){
+        return $response
+    }else{
+        return $response.Tokens.token
+    }
+}
+
+function Get-DayLightSavingTime {
+ 
+<#
+.SYNOPSIS
+    Returns the beginning and ending date for daylight saving time.
+.DESCRIPTION
+    Get-DayLightSavingTime is a function that returns the dates when
+    daylight saving time begins and ends for the specified year.
+.PARAMETER Year
+    The year to return the daylight saving time dates for. The year cannot
+    be earlier than 2007 because the dates were in April and October instead
+    of March and November prior to that year. The default is the current year.
+.EXAMPLE
+    Get-DayLightSavingTime
+.EXAMPLE
+    Get-DayLightSavingTime -Year 2014, 2015
+.EXAMPLE
+    Get-DayLightSavingTime -Year (2011..2020)
+.EXAMPLE
+    2014, 2015 | Get-DayLightSavingTime
+.EXAMPLE
+    2011..2020 | Get-DayLightSavingTime
+.INPUTS
+    Integer
+.OUTPUTS
+    PSCustomObject
+.NOTES
+    Written by Mike F Robbins
+    Blog: http://mikefrobbins.com
+    Twitter: @mikefrobbins
+#>
+ 
+    [CmdletBinding()]
+    param (
+        [Parameter(ValueFromPipeline)]
+        [ValidateRange(2007,9999)]
+        [Int[]]$Year = (Get-Date).Year
+    )
+ 
+    PROCESS {
+        foreach ($y in $Year) {
+ 
+            [datetime]$beginDate = "March 1, $y"
+ 
+            while ($beginDate.DayOfWeek -ne 'Sunday') {
+                $beginDate = $beginDate.AddDays(1)
+            }
+ 
+            [datetime]$endDate = "November 1, $y"
+ 
+            while ($endDate.DayOfWeek -ne 'Sunday') {
+                $endDate = $endDate.AddDays(1)
+            }            
+ 
+            [PSCustomObject]@{
+                'Year' = $y
+                'BeginDate' = $($beginDate.AddDays(7).AddHours(2))
+                'EndDate' = $($endDate.AddHours(2))
+            }
+ 
+        }
+    }
+}
+
+function Get-RecursiveComparison{
+    param(
+        [hashtable]$obj1,
+        [hashtable]$obj2,
+        [string]$prefix="",
+        [switch]$IncludeEqual
+    )
+    if($prefix){$prefix += '.'}
+    
+    foreach ($item in $obj1.GetEnumerator()){
+        if($item.Value.GetType().Name -match "hashtable" -and $obj2 -and $obj2.$($item.Name) -and $obj2.$($item.Name).GetType().Name -match "hashtable"){
+            Get-RecursiveComparison -obj1 $item.Value -obj2 $obj2.$($item.Name)  -prefix "$prefix$($item.Name)"
+        }elseif($item.Value.GetType().Name -match "hashtable" -and (!$obj2 -or $obj2.Count -eq 0 -or !$obj2.$($item.Name) -or !$obj2.ContainsKey($item.Name) -or !($obj2.$($item.Name).GetType().Name -match "hashtable"))){
+            $r = "" | select Field,Object1,Operator,Object2
+            $r.Field = "$prefix$($item.Name)"
+            $r.Object1 = Get-FlattenedHashtable -hashtable $item.Value -prefix $prefix
+            if($obj2.ContainsKey($item.Name)){
+                $r.Object2 = $obj2.$($item.Name)
             }else{
-                Write-Host -Debug -ForegroundColor Magenta "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+                $r.Object2 = ""
             }
-        }
-
-        while($hitcount -ge 10000){
-            $curr_interval = [math]::Round(($curr_interval*$DefaultBackoffInterval),0)
-            Write-Host -Debug -ForegroundColor Cyan "Reducing interval to $curr_interval minutes"
-            $results = Get-ElkRecords -ElkCredential $ElkCredential -ElkIndex $SourceIndex -ElkQuery $final_query -startTime $curr_start -endTime $curr_start.AddMinutes($curr_interval)
-            $hitcount = $results.hits.total.value
-        }
-
-        Write-Host -Debug -ForegroundColor Green "Processing $hitcount records..."
-
-        $allresults = $this_hostname = $eventdata = $ht = $null
-        $allresults = $results.hits.hits | ?{$_._source.message -match $SourceMessageIncludeRegex} | ?{$_._source.message -notmatch  $SourceMessageExcludeRegex} | %{
-            $this_hostname = iex "`$_._source.$SourceHostFieldName"; 
-            $this_timestamp = $_._source.'@timestamp'
-            $eventdata = $_._source.message | sls "<EventData>(.*)</EventData>" -AllMatches | % Matches | % Groups | ? Name -EQ 1 | % Value; 
-            $ht = @{}; 
-            $eventdata -split '</Data>' | ?{$_} | %{
-                $matches = $_ | sls "<Data Name=.([A-Z0-9]+).>(.*)" -AllMatches | % Matches | ?{$_}; 
-                foreach($m in $matches){ 
-                    $ht.add($($m | % Groups | ? Name -eq 1 | % Value), $($m | % Groups | ? Name -eq 2 | % Value))
+            $r.Operator = "<="
+            $r
+        }else{
+            if($obj2.Count -eq 0 -or !$obj2.ContainsKey($item.Name)){
+                $r = "" | select Field,Object1,Operator,Object2
+                $r.Field = "$prefix$($item.Name)"
+                if($item.Value.GetType().Name -match "hashtable"){
+                    $r.Object1 = Get-FlattenedHashtable -hashtable $item.Value -prefix $prefix
+                }else{
+                    $r.Object1 = $item.Value
                 }
-            };
-            $ht.Add($DestinationHostFieldName,$this_hostname); 
-            if($ht.UtcTime -eq "" -or $ht.UtcTime -eq $null){
-                $ht.Add("@timestamp",(Get-Date $this_timestamp).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"))
+                $r.Object2 = " "
+                $r.Operator = "<="
+                $r    
             }else{
-                $ht.Add("@timestamp",(Get-Date $ht.UtcTime).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"))
+                $c = Compare-Object $item.Value $obj2.$($item.Name)
+            
+                if(!$c -and $IncludeEqual){
+                    $r = "" | select Field,Object1,Operator,Object2
+                    $r.Field = "$prefix$($item.Name)"
+                    $r.Object1 = $item.Value
+                    $r.Object2 = $obj2.$($item.Name)
+                    $r.Operator = "="
+                    $r
+                }elseif($c){
+                    $r = "" | select Field,Object1,Operator,Object2
+                    $r.Field = "$prefix$($item.Name)"
+                    $r.Object1 = $item.Value
+                    $r.Object2 = $obj2.$($item.Name)
+                    $r.Operator = $c.SideIndicator
+                    $r
+                }
             }
-            Add-ElkRecords -ElkCredential $ElkCredential -ElkIndex $DestinationIndex -recordJson ($ht | ConvertTo-Json -depth 10) | out-null 
-            #[pscustomobject]$ht; 
-
-        } 
-
-        <#
-        foreach ($result in $allresults) {
-            $result | Add-Member -MemberType NoteProperty -Name "@timestamp" -Value (Get-Date $result.UtcTime).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"); 
-            #$result | Add-Member -MemberType NoteProperty -Name "hostname" -Value "rangers-apache"; 
-            Add-ElkRecords -ElkCredential $cred -ElkIndex $DestinationIndex -recordJson ($result | convertto-json -depth 10) | out-null 
         }
-        #>
+    }
+    foreach ($item in $obj2.GetEnumerator()){
+        if($item.Value.GetType().Name -match "hashtable" -and $obj1 -and $obj1.$($item.Name) -and $obj1.$($item.Name).GetType().Name -match "hashtable"){
+            #do nothing - we already handled this condition above
+        }elseif($item.Value.GetType().Name -match "hashtable" -and (!$obj1 -or $obj1.Count -eq 0 -or !$obj1.$($item.Name) -or !$obj1.ContainsKey($item.Name) -or !($obj1.$($item.Name).GetType().Name -match "hashtable"))){
+            $r = "" | select Field,Object1,Operator,Object2
+            $r.Field = "$prefix$($item.Name)"
+            if($obj1.ContainsKey($item.Name)){
+                $r.Object1 = $obj1.$($item.Name)
+            }else{
+                $r.Object1 = ""
+            }
+            $r.Object2 = Get-FlattenedHashtable -hashtable $item.Value -prefix $prefix
+            $r.Operator = "=>"
+            $r
+        }else{
+            if($obj1.Count -eq 0 -or !$obj1.ContainsKey($item.Name)){
+                $r = "" | select Field,Object1,Operator,Object2
+                $r.Field = "$prefix$($item.Name)"
+                $r.Object1 = " "
+                if($item.Value.GetType().Name -match "hashtable"){
+                    $r.Object2 = Get-FlattenedHashtable -hashtable $item.Value -prefix $prefix
+                }else{
+                    $r.Object2 = $item.Value
+                }
+                $r.Operator = "=>"
+                $r    
+            }else{
+                $c = Compare-Object $obj1.$($item.Name) $item.Value 
+            
+                if(!$c -and $IncludeEqual){
+                    #Do Nothing we should have already handled this when looking at Obj1 above
+                }elseif($c){
+                    $r = "" | select Field,Object1,Operator,Object2
+                    $r.Field = "$prefix$($item.Name)"
+                    $r.Object1 = $obj2.$($item.Name)
+                    $r.Object2 = $item.Value
+                    $r.Operator = $c.SideIndicator
+                    $r
+                }
+            }
+        }
+    }
+}
 
-        $curr_start=$curr_start.AddMinutes($curr_interval)
+function Get-FlattenedHashtable{
+    param(
+        [hashtable]$hashtable,
+        [string]$prefix=""
+    )
+    if($prefix){$prefix += '.'}
+    if(!$hashtable){
+        $null
+    }else{
+        foreach($item in $hashtable.GetEnumerator()){
+            if($item.Value.GetType().Name -match "hashtable"){
+            
+                Get-FlattenedHashtable -hashtable $item.Value -prefix "$prefix$($item.Name)"
+            }else{
+                $o = "" | select Name,Value
+                $o.Name = "$prefix$($item.Name)"
+                $o.Value = $item.Value
+                $o
+            }
+        }
+    }
+}
 
-        if($hitcount -gt 0 -and $hitcount -lt ($MaxRecordBatchSize * $DefaultExpandMinimumThreshold)){
-            $curr_interval = [math]::Round(($curr_interval*$DefaultExpandInterval),0)
-            Write-Host -Debug -ForegroundColor Cyan "Increasing interval to $curr_interval minutes"
+function Get-ProcessTree{
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:9200",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [string]$ELKIndex="hunt*",
+        [Parameter(Mandatory=$true)]  [string]$seedGUID,
+        [Parameter(Mandatory=$false)] [switch]$allParents,
+        [Parameter(Mandatory=$false)] [switch]$noParents,
+        [Parameter(Mandatory=$false)] [int]$MaxGUIDs=400,
+        [Parameter(Mandatory=$false)] [string]$ParentImageCutoffRegex="\\(services|explorer|winlogon|userinit|svchost).exe",
+        [Parameter(Mandatory=$false, ParameterSetName="Fields")] [hashtable]$EventIdDisplayFields=@{1=@("CommandLine");8=@("SourceImage","TargetImage");11=@("TargetFilename");22=@("QueryName","QueryResults")},
+        [Parameter(Mandatory=$false, ParameterSetName="Fields")] [switch]$NoEventDescriptions,
+        [Parameter(Mandatory=$false, ParameterSetName="Fields")] [switch]$NoTimestamps,
+        [Parameter(Mandatory=$false)] [ValidateRange(1,6)] [int]$Verbosity=6,
+        [Parameter(Mandatory=$false)] [switch]$JustShowMeTheTree,        
+        [Parameter(Mandatory=$false)] [ValidateSet("Chronological", "PreserveTree")] [string]$SortOrder="PreserveTree",
+        [Parameter(Mandatory=$false)] [string]$CSVOutputFile,
+        [Parameter(Mandatory=$false)] [int]$numDaysAgoStart=30,
+        [Parameter(Mandatory=$false)] [int]$numDaysAgoEnd=0        
+    )
+
+    Get-TreeArt
+
+    if(!($EventIdDisplayFields.Keys -contains "1")){
+        $EventIdDisplayFields.Add(1,@("CommandLine"))
+        Write-Warning "Adding event ID 1 since that is necessary for process chanining"
+    }
+
+    switch ($Verbosity){
+        1 { $EventIdDisplayFields=@{1=@("CommandLine")} }
+        2 { $EventIdDisplayFields=@{1=@("User","CommandLine");8=@("SourceImage","TargetImage");22=@("QueryName","QueryResults")} }
+        3 { $EventIdDisplayFields=@{1=@("User","CommandLine");8=@("SourceImage","TargetImage");11=@("TargetFilename");22=@("QueryName","QueryResults")} }
+        4 { $EventIdDisplayFields=@{1=@("User","OriginalFileName","CommandLine");3=@("SourceIp","SourcePort";"DestinationHostname","DestinationIp","DestinationPort")
+            8=@("SourceImage","TargetImage");11=@("TargetFilename");12=@("TargetObject");13=@("TargetObject","Details");14=@("TargetObject");22=@("QueryName","QueryResults")} }
+        5 { $EventIdDisplayFields=@{1=@("host","HostSourceAddress","User","OriginalFileName","Image","CurrentDirectory","CommandLine");
+            3=@("SourceIp","SourcePort";"DestinationHostname","DestinationIp","DestinationPort","Protocol","Initiated")
+            8=@("SourceImage","TargetImage");11=@("TargetFilename");12=@("TargetObject");13=@("TargetObject","Details");14=@("TargetObject");22=@("QueryName","QueryResults","QueryStatus")} }
+        6 { $EventIdDisplayFields=@{1=@("host","HostSourceAddress","User","OriginalFileName","Image","CurrentDirectory","CommandLine","Hashes");
+            3=@("SourceIp","SourcePort";"DestinationHostname","DestinationIp","DestinationPort","Protocol","Initiated")
+            8=@("SourceImage","TargetImage");11=@("TargetFilename");12=@("TargetObject");13=@("TargetObject","Details");14=@("TargetObject");22=@("QueryName","QueryResults","QueryStatus")} }
+    }
+    
+    $GUIDlist = New-Object -TypeName System.Collections.ArrayList
+    $pendingGUIDs = New-Object -TypeName System.Collections.ArrayList
+    [void]$pendingGUIDs.Add($seedGuid)
+    $global:GUIDtree = @{$seedGUID= @{}}
+    $result = $null
+    $GUIDlist_str = ''
+    $pass = 1
+    
+    Write-Host -Debug -ForegroundColor Green "Searching for related GUIDs in Process Tree..."
+    while($pendingGUIDs.Count -gt 0 -and $GUIDlist.Count -le $MaxGUIDs){
+        $pendingGUIDs | %{[void]$GUIDlist.Add($_)}
+        $pendingGUIDs.Clear()
+        
+        $GUIDlist_str = ''
+        $GUIDlist | %{$GUIDlist_str+='"'+$_+'" OR '}
+        $GUIDlist_str = $GUIDlist_str.Substring(0, $GUIDlist_str.Length -4)
+
+        $result = Get-ELKRecords -ELKrestURI $ELKrestURI -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ElkCredentialIsAPIKey -ELKIndex $ElkIndex -ELKQuery $('event_id:1 AND (event_data.ProcessGuid:('+$GUIDlist_str+') OR event_data.ParentProcessGuid:('+$GUIDlist_str+'))') -numDaysAgoStart $numDaysAgoStart -numDaysAgoEnd $numDaysAgoEnd
+        
+        if(!$JustShowMeTheTree){
+            Write-Host -Debug -ForegroundColor Green "Pass #$($pass): Hit Count:$($result.hits.total.value)"
+        }
+
+        if($result.hits.total.value -gt $MaxGUIDs -or $GUIDlist.Count -gt $MaxGUIDs){
+            Write-Host -Debug -ForegroundColor Yellow "MaxGUIDs value exceeded. Invoking Lumberjack protocol!"
+            break
         }
         
-        $results = Get-ElkRecords -ElkCredential $ElkCredential -ElkIndex $SourceIndex -ElkQuery $final_query -startTime $curr_start -endTime $curr_start.AddMinutes($curr_interval)
-        $hitcount = $results.hits.total.value
-        if($hitcount -ge 10000){
-            Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
-        }elseif($hitcount -eq 0){
-            Write-Host -Debug -ForegroundColor Yellow "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
-        }else{
-            Write-Host -Debug -ForegroundColor Magenta "Got $hitcount records for period $($curr_start) to $($curr_start.AddMinutes($curr_interval))"
+        if($result -and $result.hits.total.value -gt 0 -and $result.hits.total.value -le $MaxGUIDs){
+            foreach($hit in $result.hits.hits){
+                $global:GUIDtree = [hashtable](Insert-RecursiveGUID -ParentGUID $hit._source.event_data.ParentProcessGuid -ChildGUID $hit._source.event_data.ProcessGuid -Tree $global:GUIDtree)
+                #Print-GUIDTree $GUIDtree
+                if(!$noParents -and !($GUIDlist.Contains($hit._source.event_data.ParentProcessGuid)) -and !($pendingGUIDs.Contains($hit._source.event_data.ParentProcessGuid)) -and ($allParents -or ($hit._source.event_data.ParentImage -notmatch $ParentImageCutoffRegex) ) ){
+                    [void]$pendingGUIDs.Add($hit._source.event_data.ParentProcessGuid)
+                }
+                if(!($GUIDlist.Contains($hit._source.event_data.ProcessGuid)) -and !($pendingGUIDs.Contains($hit._source.event_data.ProcessGuid))){
+                    [void]$pendingGUIDs.Add($hit._source.event_data.ProcessGuid)
+                }
+            }
         }
+        $pass++
+    }
+    
+    $eventIdStr = ""
+    if($EventIdDisplayFields.Keys -match "[2-9]{1,2}|[0-9]{2,3}"){
+        $eventIdStr = "("
+        foreach($id in $EventIdDisplayFields.GetEnumerator()){
+            $eventIdStr += "$($id.key)" + ' OR '
+        }
+        $eventIdStr = $eventIdStr.SubString(0,$($eventIdStr.length-4)) + ') '
+        $result = Get-ELKRecords -ELKrestURI $ELKrestURI -ElkCredential $ElkCredential -ELKIndex "*:ls-wlbsysmon" -ELKQuery $('event_id:'+$eventIdStr+' AND (event_data.ProcessGuid:('+$GUIDlist_str+') OR event_data.ParentProcessGuid:('+$GUIDlist_str+'))') -numDaysAgoStart $numDaysAgoStart -numDaysAgoEnd 0
+    }else{
+        $eventIdStr = "1"
+    }
+
+    if(!$JustShowMeTheTree){
+        Write-Host -Debug -ForegroundColor Magenta "----------FINAL QUERY-----------";
+        Write-Host -Debug -ForegroundColor Green $('event_id:'+$eventIdStr+' AND (event_data.ProcessGuid:('+$GUIDlist_str+') OR event_data.ParentProcessGuid:('+$GUIDlist_str+'))');
+        Write-Host -Debug -ForegroundColor Magenta "-----------END----------`n"
+    }
+
+    $parsedResults = New-Object -TypeName System.Collections.ArrayList
+    foreach($hit in $result.hits.hits){
+        $record = $hit._source | Select-Object eventTimestamp,event_id,computer_name,host,ship_time,index_time
+        $tmp2 = $hit._source | Select-Object -ExpandProperty event_data
+        $tmp2.psobject.properties| %{Add-member -InputObject $record -NotePropertyName $_.Name -NotePropertyValue $_.Value}
+        Add-Member -InputObject $record -NotePropertyName "_id" -NotePropertyValue $($hit | Select-Object -ExpandProperty _id)
+        if($hit._source.SourceAddress){ 
+            Add-Member -InputObject $record -NotePropertyName "HostSourceAddress" -NotePropertyValue $($hit._source | Select-Object -ExpandProperty SourceAddress)
+        }else{
+            Add-Member -InputObject $record -NotePropertyName "HostSourceAddress" -NotePropertyValue "HostSourceAddress Not Available"
+        }
+
+        [void]$parsedResults.Add($record)
+    }
+
+    $root = $GUIDtree.GetEnumerator() | select -First 1
+    $answers = New-Object -TypeName System.Collections.ArrayList
+    if($NoTimeStamps){
+        $result.hits.hits._source.event_data | where ParentProcessGuid -match $root.Key | %{$str =  "$prefix$($_.ParentCommandLine)"}
+        [void]$answers.Add($str)
+    }else{
+        $rootRecord = Get-ELKRecords -ELKrestURI $ELKrestURI -ElkCredential $ElkCredential -ELKIndex "*:ls-wlbsysmon" -ELKQuery $('event_id:1 AND event_data.ProcessGuid:"'+$root.key+'"') -numDaysAgoStart $($numDaysAgoStart+7) -numDaysAgoEnd $numDaysAgoEnd
+        if($rootRecord -and $rootRecord.hits.total.value -eq 1){
+            $str = "$($rootRecord.hits.hits._source.eventTimestamp) $($rootRecord.hits.hits._source.event_data.ParentImage)->$($rootRecord.hits.hits._source.event_data.CommandLine)"
+            [void]$answers.Add($str)
+        }else{
+            $str = $result.hits.hits._source.event_data | where ParentProcessGuid -match $root.Key | select -First 1 | Select-Object -ExpandProperty ParentCommandLine | %{"$prefix$($_)"}
+            if($str -eq $null){
+                Write-Host -ForegroundColor Red -Debug "Unable to locate root node for that seedGuid. Try expanding your time window in case the process was created several days/weeks before the event/seedGuid occurred."
+                Write-Host -ForegroundColor Red -Debug "Attempting to print records anyway..."
+                $parsedResults | select-object -expandProperty ProcessGuid | sort-object | get-unique | %{ if (!$global:GUIDTree.ContainsKey($_)){ $global:GUIDtree.add($_, @{})}}
+            }else{
+                [void]$answers.Add("$prefix$($str)")
+            }
+        }        
+    }
+    If($answers.Count -eq 0){[Void]$answers.Add("Unable to Locate Root/Parent node")}
+    
+    if($parsedResults.Count -eq 0){
+        Write-Host -ForegroundColor Red -Debug "No records were returned for that final query. Try expanding your time window with the '-numDaysAgoStart' parameter, it is likely that the seedGUid you observed was logged more than $numDaysAgoStart days ago"
+        return
+    }
+    $answers = Print-ProcessTree -Tree $GUIDtree -records $parsedResults -EventIdDisplayFields $EventIdDisplayFields -NoTimestamps $NoTimestamps.IsPresent -NoEventDescription $NoEventDescriptions.IsPresent -answer $answers.clone()
+
+    if($SortOrder -eq "Chronological"){
+        $answers | sort | Write-Host -Debug -ForegroundColor Green
+    }else{
+        $answers | Write-Host -Debug -ForegroundColor Green
+    }
+    return $result
+}
+
+function Get-ProcessChain{
+
+}
+
+function Get-ProcessActivity{
+    param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$false)] $ELKrestURI = "http://localhost:9200",
+        [Parameter(Mandatory=$false)] [PSCredential]$ElkCredential,
+        [Parameter(Mandatory=$false)] [switch]$ElkCredentialIsAPIKey,
+        [Parameter(Mandatory=$false)] [string]$ElkIndex="hunt*",
+        [Parameter(Mandatory=$true)]  [string]$ProcessGUID,
+        [Parameter(Mandatory=$false)] [int[]]$EventIDs=@(1,3,5,8,10,11,13,17,18,22,25),
+        [Parameter(Mandatory=$false)] [int]$RecordCount=10000,
+        [Parameter(Mandatory=$false)] [int]$numDaysAgoStart=30,
+        [Parameter(Mandatory=$false)] [int]$numDaysAgoEnd=0        
+    )
+
+    $result = Get-ELKRecords -ElkCredential $ElkCredential -ElkCredentialIsAPIKey:$ElkCredentialIsAPIKey -ELKrestURI $ELKrestURI -ELKIndex $ElkIndex -TimeField "@timestamp" -ELKQuery ('(event_data.ProcessGuid:"'+$ProcessGUID+'" OR event_data.ParentProcessGuid:"'+$ProcessGUID+'") AND event_id:("'+($EventIDs -join '" OR "')+'")') -numDaysAgoStart $numDaysAgoStart -numDaysAgoEnd $numDaysAgoEnd -RecordCount $RecordCount -SortField "event_id" -SortOrder asc;
+
+    if($result -and $result.hits.total.value -gt 0){
+        return $result.hits.hits
+    }else{
+        return $result
+    }
+}
+Set-Alias -Name GPA -Value Get-ProcessActivity -Scope Global -Force -Option AllScope
+
+# $r = Get-ELKRecords -ELKQuery "ComputerName:MyComputer AND event_id:1" -numMinutesAgoStart 30
+# $r1 = Get-ELKRecords -ELKQuery 'event_data.ProcessGuid:"{e3be14db-0552-63e8-b0a9-090000004400}"' -numDaysAgoStart 90
+# Show-ProcessActivity -hits $r1.hits.hits -Verbosity 6 -Summarize
+# Show-ProcessActivity -hits $r1.hits.hits -Verbosity 0 -AllColumns -EventIDs ($r1.hits.hits._source.event_id | Sort-Object -Unique) | Out-GridView
+# Get-ProcessActivity -ProcessGUID "{e3be14db-0552-63e8-b0a9-090000004400}" -numDaysAgoStart 90 | Show-ProcessActivity -Verbosity 3 -AllColumns | Out-GridView
+# Get-ProcessActivity -ProcessGUID "{e3be14db-0552-63e8-b0a9-090000004400}" -numDaysAgoStart 90 | Show-ProcessActivity -Verbosity 3 -Summarize
+function Show-ProcessActivity{
+    Param(
+        [CmdletBinding()]
+        [Parameter(Mandatory=$true, ValueFromPipeLine=$true)] [ValidateNotNullOrEmpty()] [pscustomobject[]]$hits,
+        [Parameter(Mandatory=$false)] [pscustomobject[]]$FieldMapping,
+        [Parameter(Mandatory=$false)] [int[]]$EventIDs=@(1,3,5,8,10,11,13,18,22,25),
+        [Parameter(Mandatory=$false)] [int]$Verbosity=1,
+        [Parameter(Mandatory=$false)] [switch]$Summarize,
+        [Parameter(Mandatory=$false)] [int]$Max_Summary_Count=20,
+        [Parameter(Mandatory=$false)] [switch]$AllColumns,
+        [Parameter(Mandatory=$false)] [string]$Timefield="@timestamp"
+    )
+
+    begin{
+        <#
+    $sb_time = {$_.'@timestamp'}
+    $sb_hostname = {$_.beat.name}
+    $sb_cmdline = {$_.event_data.CommandLine}
+    $sb_company = {$_.event_data.Company}
+    $sb_desc = {$_.event_data.Description}
+    $sb_fVer = {$_.event_data.FileVersion}
+    $sb_hashes = {$_.event_data.Hashes}
+    $sb_integrity = {$_.event_data.Integrity}
+    $sb_product = {$_.event_data.Product}
+    $sb_pid = {$_.event_data.ProcessId}
+    $sb_ppid = {$_.event_data.ParentProcessId}
+    $sb_hash_imp = {$_.hash_imphash}
+    $sb_hash_sha256 = {$_.hash_sha256}
+    $sb_img = {$_.event_data.Image}
+    $sb_cwd = {$_.event_data.CurrentDirectory}
+    $sb_unit = {$_.'user.unit_name'}
+    $sb_pCmdline = {$_.event_data.ParentCommandLine}
+    $sb_pImg = {$_.event_data.ParentImage}
+    $sb_usr = {$_.event_data.User}
+    $sb_pUsr = {$_.event_data.ParentUser}
+    $sb_origFname = {$_.event_data.OriginalFileName}
+    $sb_guid = {$_.event_data.ProcessGuid}
+    $sb_logonGuid = {$_.event_data.LogonGuid}
+    $sb_termSessId = {$_.event_data.TerminalSessionId}
+    $sb_pGuid = {$_.event_data.ParentProcessGuid}
+    $sb_logonId = {$_.event_data.LogonId}
+    $sb_rule = {$_.event_data.RuleName}
+
+    $sb_tgtFile = {$_.event_data.TargetFilename}
+    $sb_createTm = {$_.event_data.CreationUtcTime}
+    $sb_prevCreateTm = {$_.event_data.PreviousCreationUtcTime}
+
+    $sb_dstIP = {$_.event_data.DestinationIp}
+    $sb_dstHost = {$_.event_data.DestinationHostname}
+    $sb_dstPort = {$_.event_data.DestinationPort}
+    $sb_dstIPv6 = {$_.event_data.DestinationIsIpv6}
+    $sb_srcIP = {$_.event_data.SourceIp}
+    $sb_srcHost = {$_.event_data.SourceHostname}
+    $sb_srcPort = {$_.event_data.SourcePort}
+    $sb_srcIPv6 = {$_.event_data.SourceIsIpv6}
+    $sb_proto = {$_.event_data.Protocol}
+
+    $sb_state = {$_.event_data.State}
+    $sb_ver = {$_.event_data.Version}
+
+    $sb_sig = {$_.event_data.Signature}
+    $sb_sigStat = {$_.event_data.SignatureStatus}
+    $sb_signed = {$_.event_data.Signed}
+
+    $sb_imgload = {$_.event_data.ImageLoaded}
+    $sb_initiated = {$_.event_data.Initiated}
+
+    $sb_srcUsr = {$_.event_data.SourceUser}
+    $sb_tgtUsr = {$_.event_data.TargetUser}
+    $sb_srcGuid = {$_.event_data.SourceProcessGuid}
+    $sb_tgtGuid = {$_.event_data.TargetProcessGuid}
+    $sb_srcImg = {$_.event_data.SourceImage}
+    $sb_tgtImg = {$_.event_data.TargetImage}
+    $sb_srcPid = {$_.event_data.SourceProcessId}
+    $sb_tgtPid = {$_.event_data.TargetProcessId}
+    $sb_startFunc = {$_.event_data.StartFunction}
+    $sb_startAddr = {$_.event_data.StartAddress}
+    $sb_startMod = {$_.event_data.StartModule}
+    $sb_newThread = {$_.event_data.NewThreadId}
+
+    $sb_dev = {$_.event_data.Device}
+
+    $sb_callTrace = {$_.event_data.CallTrace}
+    $sb_grantAccess = {$_.event_data.GrantedAccess}
+    $sb_srcThread = {$_.event_data.SourceThreadId}
+    
+    $sb_evtType = {$_.event_data.EventType}
+    $sb_details = {$_.event_data.Details}
+    $sb_tgtObj = {$_.event_data.TargetObject}
+
+    $sb_contents = {$_.event_data.Contents}
+    $sb_hash = {$_.event_data.Hash}
+    
+    $sb_pipe = {$_.event_data.PipeName}
+    
+    $sb_namespace = {$_.event_data.EventNamespace}
+    $sb_name = {$_.event_data.Name}
+    $sb_op = {$_.event_data.Operation}
+    $sb_query = {$_.event_data.Query}
+    $sb_type = {$_.event_data.Type}
+    $sb_dest = {$_.event_data.Destination}
+    $sb_consumer = {$_.event_data.Consumer}
+    $sb_filter = {$_.event_data.Filter}
+    
+    $sb_qName = {$_.event_data.QueryName}
+    $sb_qResult = {$_.event_data.QueryResults}
+    $sb_qStat = {$_.event_data.QueryStatus}
+    
+    $sb_archived = {$_.event_data.Archived}
+    $sb_isExe = {$_.event_data.IsExecutable}
+    
+    #>
+        $EventIDFieldMappings = @(
+        @{Name="EventID";EventID=@(1..255);Verbosity=0;Expression={$_.event_id}},
+        @{Name="Timestamp";EventID=@(1..26);Verbosity=0;Expression={$_.'@timestamp'}},
+        @{Name="Hostname";EventID=@(1..26);Verbosity=0;Expression={$_.beat.name}},
+        @{Name="CommandLine";EventID=@(1);Verbosity=1;Expression={$_.event_data.CommandLine}},
+        @{Name="Company";EventID=@(1,7);Verbosity=5;Expression={$_.event_data.Company}},
+        @{Name="Description";EventID=@(1,255);Verbosity=5;Expression={$_.event_data.Description}},
+        @{Name="FileVersion";EventID=@(1,7);Verbosity=5;Expression={$_.event_data.FileVersion}},
+        @{Name="Hashes";EventID=@(1,6,7,23,26);Verbosity=4;Expression={$_.event_data.Hashes}},
+        @{Name="Integrity";EventID=@(1);Verbosity=5;Expression={$_.event_data.IntegrityLevel}},
+        @{Name="Product";EventID=@(1,7);Verbosity=5;Expression={$_.event_data.Product}},
+        @{Name="PID";EventID=@(1,2,3,5,7,9,11,13,15,17,18,22,23,25,26);Verbosity=3;Expression={$_.event_data.ProcessId}},
+        @{Name="PPID";EventID=@(1);Verbosity=3;Expression={$_.event_data.ParentProcessId}},
+        @{Name="Imphash";EventID=@(1,6,7,23,26);Verbosity=4;Expression={$_.hash_imphash}},
+        @{Name="Sha256";EventID=@(1,6,7,23,26);Verbosity=4;Expression={$_.hash_sha256}},
+        @{Name="Image";EventID=@(1,2,3,5,7,9,11,12,13,15,17,18,22,23,25,26);Verbosity=0;Expression={$_.event_data.Image}},
+        @{Name="CWD";EventID=@(1);Verbosity=3;Expression={$_.event_data.CurrentDirectory}},
+        @{Name="Unit";EventID=@(1,2,3,5,11,12,13,15,17,18,22,25);Verbosity=0;Expression={$_.'user.unit_name'}},
+        @{Name="ParentCommandLine";EventID=@(1);Verbosity=1;Expression={$_.event_data.ParentCommandLine}},
+        @{Name="ParentImage";EventID=@(1);Verbosity=1;Expression={$_.event_data.ParentImage}},
+        @{Name="User";EventID=@(1,2,3,5,7,9,11,12,13,15,17,18,19,20,21,22,23,25,26);Verbosity=0;Expression={$_.event_data.User}},
+        @{Name="ParentUser";EventID=@(1);Verbosity=3;Expression={$_.event_data.ParentUser}},
+        @{Name="OriginalFileName";EventID=@(1,7);Verbosity=4;Expression={$_.event_data.OriginalFileName}},
+        @{Name="ProcessGuid";EventID=@(1,2,3,5,7,9,11,12,13,15,17,18,22,23,25,26);Verbosity=5;Expression={$_.event_data.ProcessGuid}},
+        @{Name="LogonGuid";EventID=@(1);Verbosity=5;Expression={$_.event_data.LogonGuid}},
+        @{Name="TerminalSessionId";EventID=@(1);Verbosity=5;Expression={$_.event_data.TerminalSessionId}},
+        @{Name="ParentProcessGuid";EventID=@(1);Verbosity=5;Expression={$_.event_data.ParentProcessGuid}},
+        @{Name="LogonId";EventID=@(1);Verbosity=5;Expression={$_.event_data.LogonId}},
+        @{Name="RuleName";EventID=@(1..26);Verbosity=6;Expression={$_.event_data.RuleName}},
+
+        @{Name="TargetFilename";EventID=@(2,11,15,23,26);Verbosity=0;Expression={$_.event_data.TargetFilename}},
+        @{Name="CreationUtcTime";EventID=@(2,11,15);Verbosity=2;Expression={$_.event_data.CreationUtcTime}},
+        @{Name="PreviousCreationUtcTime";EventID=@(2);Verbosity=0;Expression={$_.event_data.PreviousCreationUtcTime}},
+
+        @{Name="DestinationIp";EventID=@(3);Verbosity=0;Expression={$_.event_data.DestinationIp}},
+        @{Name="DestinationHostname";EventID=@(3);Verbosity=1;Expression={$_.event_data.DestinationHostname}},
+        @{Name="DestinationPort";EventID=@(3);Verbosity=2;Expression={$_.event_data.DestinationPort}},
+        @{Name="DestinationIsIpv6";EventID=@(3);Verbosity=3;Expression={$_.event_data.DestinationIsIpv6}},
+        @{Name="SourceIp";EventID=@(3);Verbosity=0;Expression={$_.event_data.SourceIp}},
+        @{Name="SourceHostname";EventID=@(3);Verbosity=1;Expression={$_.event_data.SourceHostname}},
+        @{Name="SourcePort";EventID=@(3);Verbosity=2;Expression={$_.event_data.SourcePort}},
+        @{Name="SourceIsIpv6";EventID=@(3);Verbosity=3;Expression={$_.event_data.SourceIsIpv6}},
+        @{Name="Protocol";EventID=@(3);Verbosity=3;Expression={$_.event_data.Protocol}},
+        @{Name="Initiated";EventID=@(3);Verbosity=2;Expression={$_.event_data.Initiated}},
+
+        @{Name="State";EventID=@(4);Verbosity=0;Expression={$_.event_data.State}},
+        @{Name="Version";EventID=@(4);Verbosity=0;Expression={$_.event_data.Version}},
+
+        @{Name="Signature";EventID=@(6,7);Verbosity=2;Expression={$_.event_data.Signature}},
+        @{Name="SignatureStatus";EventID=@(6,7);Verbosity=1;Expression={$_.event_data.SignatureStatus}},
+        @{Name="Signed";EventID=@(6,7);Verbosity=1;Expression={$_.event_data.Signed}},
+
+        @{Name="ImageLoaded";EventID=@(6,7);Verbosity=0;Expression={$_.event_data.ImageLoaded}},        
+
+        @{Name="SourceUser";EventID=@(8,10);Verbosity=1;Expression={$_.event_data.SourceUser}},
+        @{Name="TargetUser";EventID=@(8,10);Verbosity=1;Expression={$_.event_data.TargetUser}},
+        @{Name="SourceProcessGuid";EventID=@(8);Verbosity=3;Expression={$_.event_data.SourceProcessGuid}},
+        @{Name="TargetProcessGuid";EventID=@(8);Verbosity=3;Expression={$_.event_data.TargetProcessGuid}},
+        @{Name="SourceImage";EventID=@(8,10);Verbosity=0;Expression={$_.event_data.SourceImage}},
+        @{Name="TargetImage";EventID=@(8,10);Verbosity=0;Expression={$_.event_data.TargetImage}},
+        @{Name="SourceProcessId";EventID=@(8,10);Verbosity=2;Expression={$_.event_data.SourceProcessId}},
+        @{Name="TargetProcessId";EventID=@(8,10);Verbosity=2;Expression={$_.event_data.TargetProcessId}},
+        @{Name="StartFunction";EventID=@(8);Verbosity=3;Expression={$_.event_data.StartFunction}},
+        @{Name="StartAddress";EventID=@(8);Verbosity=3;Expression={$_.event_data.StartAddress}},
+        @{Name="StartModule";EventID=@(8);Verbosity=3;Expression={$_.event_data.StartModule}},
+        @{Name="NewThreadId";EventID=@(8);Verbosity=3;Expression={$_.event_data.NewThreadId}},
+
+        @{Name="Time";EventID=@(9);Verbosity=0;Expression={$_.event_data.Device}},
+
+        @{Name="CallTrace";EventID=@(10);Verbosity=5;Expression={$_.event_data.CallTrace}},
+        @{Name="GrantedAccess";EventID=@(10);Verbosity=4;Expression={$_.event_data.GrantedAccess}},
+        @{Name="SourceThreadId";EventID=@(10);Verbosity=4;Expression={$_.event_data.SourceThreadId}},
+    
+        @{Name="EventType";EventID=@(12,13,17,18,19,20,21);Verbosity=2;Expression={$_.event_data.EventType}},
+        @{Name="Details";EventID=@(13);Verbosity=1;Expression={$_.event_data.Details}},
+        @{Name="TargetObject";EventID=@(12,13);Verbosity=0;Expression={$_.event_data.TargetObject}},
+
+        @{Name="Contents";EventID=@(15);Verbosity=0;Expression={$_.event_data.Contents}},
+        @{Name="Hash";EventID=@(15);Verbosity=1;Expression={$_.event_data.Hash}},
+    
+        @{Name="PipeName";EventID=@(17,18);Verbosity=0;Expression={$_.event_data.PipeName}},
+    
+        @{Name="EventNamespace";EventID=@(19);Verbosity=0;Expression={$_.event_data.EventNamespace}},
+        @{Name="Name";EventID=@(19,20);Verbosity=0;Expression={$_.event_data.Name}},
+        @{Name="Operation";EventID=@(19..21);Verbosity=0;Expression={$_.event_data.Operation}},
+        @{Name="Query";EventID=@(19);Verbosity=0;Expression={$_.event_data.Query}},
+        @{Name="Type";EventID=@(20,25);Verbosity=0;Expression={$_.event_data.Type}},
+        @{Name="Destination";EventID=@(20);Verbosity=0;Expression={$_.event_data.Destination}},
+        @{Name="Consumer";EventID=@(21);Verbosity=0;Expression={$_.event_data.Consumer}},
+        @{Name="Filter";EventID=@(21);Verbosity=0;Expression={$_.event_data.Filter}},
+    
+        @{Name="QueryName";EventID=@(22);Verbosity=0;Expression={$_.event_data.QueryName}},
+        @{Name="QueryResults";EventID=@(22);Verbosity=1;Expression={$_.event_data.QueryResults}},
+        @{Name="QueryStatus";EventID=@(22);Verbosity=4;Expression={$_.event_data.QueryStatus}},
+    
+        @{Name="Archived";EventID=@(23);Verbosity=2;Expression={$_.event_data.Archived}},
+        @{Name="IsExecutable";EventID=@(23,26);Verbosity=2;Expression={$_.event_data.IsExecutable}}
+    )
+        if(!$FieldMapping){$FieldMapping = $EventIDFieldMappings.Clone()}
+
+        if($Summarize){
+            $o = New-Object -TypeName psobject 
+            $o | Add-Member -MemberType NoteProperty -Name "StartTime" -Value $null
+            $o | Add-Member -MemberType NoteProperty -Name "EndTime" -Value $null
+        }
+        if($hits.Count -gt 0 -and $PSCmdlet.MyInvocation.Line -notmatch " -EventIDs "){
+            $EventIDs = $hits._source.event_id | ?{$_} | Sort-Object -Unique
+        }
+
+        $thisEIDmap = @()
+        if($AllColumns){
+            foreach($eid in $EventIDs){
+                
+                foreach ($map in ($FieldMapping | ?{$_.EventID.Contains($eid) -and  $_.Verbosity -le $Verbosity})){  
+                    if($thisEIDmap | where {$_.Name -eq $map.Name}){
+                        continue
+                    }else{
+                        if($hits.Count -gt 0 -and ($hits._source | ? $map.Expression | ? {$_} | Measure-Object | % Count) -gt 0){
+                            $thisEIDmap +=  @{Name=$map.Name;expression=$map.Expression} 
+                        }elseif($hits.Count -eq 0){
+                            $thisEIDmap +=  @{Name=$map.Name;expression=$map.Expression} 
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    process{
+        if($Summarize){
+            foreach($eid in ($hits._source.event_id | Sort-Object -Unique )){ 
+                foreach ($map in $FieldMapping){ 
+                    if($map.EventID.Contains($eid) -and $map.Verbosity -le $Verbosity){
+                        if($o.psobject.Properties.Name.Contains($map.Name)){
+                            $mbrCount = $o.$($map.Name).Count
+                            if($mbrCount -lt $Max_Summary_Count){
+                                [string[]]$o.$($map.Name) += [string[]]($hits._source | Select-Object -Property @{Name=$map.Name;expression=$map.Expression} | % $($map.Name) | Sort-Object -Unique | ?{$_ -ne "-"} | ?{$_} | select -First ($Max_Summary_Count - $mbrCount) )
+                                $o.$($map.Name) = $o.$($map.Name) | Sort-Object -Unique
+                            }
+                        }else{
+                            $o | Add-Member -MemberType NoteProperty -Name $map.Name -Value ($hits._source | Select-Object -Property @{Name=$map.Name;expression=$map.Expression} | % $($map.Name) | Sort-Object -Unique | ?{$_ -ne "-"} | ?{$_} | select -First $Max_Summary_Count )
+                        }
+                    }
+                    
+                }
+            }
+
+        }else{
+
+            foreach($hit in $hits){
+                if(!$AllColumns){
+                    $thisEIDmap = $FieldMapping | ? {$_.EventID.Contains($hit._source.event_id) -and $_.Verbosity -le $Verbosity} | %{ @{Name=$_.Name;expression=$_.Expression} }
+                }
+                $hit._source | Select-Object -Property $thisEIDmap
+            }
+        }
+    }
+
+    end{
+        if($Summarize){
+            $o.StartTime = ([datetime]($o.Timestamp | ?{$_} | Sort-Object | select -First 1))
+            $o.EndTime = ([datetime]($o.Timestamp | ?{$_} | Sort-Object | select -Last 1))
+            $o.PSobject.Properties.Remove("Timestamp")
+            $o.PSobject.Properties.Remove("ObjectType")
+            return $o
+        }
+    }
+
+}
+Set-Alias -Name SPA -Value Show-ProcessActivity -Scope Global -Force -Option AllScope
+
+function Insert-RecursiveGUID{
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ParentGUID,
+        [Parameter(Mandatory=$true)]
+        [string]$ChildGUID,
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Tree
+    )
+    if(($Tree.Count -gt 0) -and ($Tree.GetType().Name -match "hashtable") -and $Tree.ContainsKey($ParentGUID) -and !$Tree.$ParentGUID.ContainsKey($ChildGUID)){
+        ([hashtable]($Tree.$ParentGUID)).Add($ChildGUID, @{})
+        return $Tree
+    }elseif(($Tree.Count -gt 0) -and $Tree.ContainsKey($ParentGUID) -and $Tree.$ParentGUID.ContainsKey($ChildGUID)){
+        return $Tree
+    }elseif(($Tree.Count -gt 0) -and $Tree.ContainsKey($ChildGUID)){
+        return @{$ParentGUID=$Tree}
+    }elseif(($Tree.Count -gt 0) -and ($Tree.Values -ne $null)){
+        $newTree = $Tree.Clone()
+        $newValues = @{}
+        foreach($k in $Tree.keys){
+            if($Tree.$k -eq $null){continue}
+            $newValues = (Insert-RecursiveGUID -ParentGUID $ParentGUID -ChildGUID $ChildGUID -Tree $Tree.$k)
+            $NewTree.$k = $newValues
+        }
+        return $NewTree
+    }elseif($tree.Count -eq 0){
+        return @{}
+    }else{
+        return @{}
     }
 }
 
+function Print-GUIDTree{
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Tree,
+        [Parameter(Mandatory=$false)]
+        $prefix=""
+    )
+    if(!$tree -or ($tree -eq $null) -or ($tree.count -eq 0)){return}
+    foreach($item in $Tree.GetEnumerator()){
+        if($item -ne $null -and $item -ne "" -and $item.key -ne $null -and $item.key -ne ""){write-host "$($prefix)$([string]$item.key)"}
+        Print-GUIDTree -Tree $item.value -prefix $($prefix+"-")
+    }
+}
 
-#$r2 = Get-ElkRecords -ElkCredential $cred -ElkIndex "filebeat*" -ElkQuery 'host.hostname:"rangers-apache" AND process.name:sysmon AND NOT _exists_:error.message AND NOT message:("eventid 5 eventid" OR "CommandLine>cp --parents ./elastic" )' -startTime (Get-date "2024-04-03T00:00:00Z").AddHours(6) -endTime (Get-date "2024-04-03T00:00:00Z").AddHours(18)
-#$r2.hits.hits.Count
-#$allresults =  $r2.hits.hits | ?{$_._source.message -match "\<EventID\>1\<\/EventID\>"} | ?{$_._source.message -notmatch  "(/usr/share/auditbeat/bin/auditbeat|cp --parents ./elastic-agent-8.8.2-linux-x86_64/|/usr/share/filebeat/bin/filebeat --environment systemd -c /etc/filebeat/filebeat.yml)"} | % _source | % message | %{ $eventdata = $_ | sls "<EventData>(.*)</EventData>" -AllMatches | % Matches | % Groups | ? Name -EQ 1 | % Value; $ht = @{}; $eventdata -split '</Data>' | ?{$_} | %{$matches = $_ | sls "<Data Name=.([A-Z0-9]+).>(.*)" -AllMatches | % Matches | ?{$_}; foreach($m in $matches){ $ht.add($($m | % Groups | ? Name -eq 1 | % Value), $($m | % Groups | ? Name -eq 2 | % Value))}};[pscustomobject]$ht; } 
-#foreach ($result in $allresults) {$result | Add-Member -MemberType NoteProperty -Name "@timestamp" -Value (Get-Date $result.UtcTime).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"); $result | Add-Member -MemberType NoteProperty -Name "hostname" -Value "rangers-apache"; Add-ElkRecords -ElkCredential $cred -ElkIndex "linux-sysmon" -recordJson ($result | convertto-json -depth 10) | out-null }
+function Print-ProcessTree{
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Tree,
+        [Parameter(Mandatory=$true)]
+        [Object[]]$records,
+        [Parameter(Mandatory=$false)]
+        [string]$prefix="",
+        [Parameter(Mandatory=$false)]
+        [bool]$NoTimestamps,
+        [Parameter(Mandatory=$false)]
+        [bool]$NoEventDescription=$false,
+        [Parameter(Mandatory=$false)]
+        [hashtable]$EventIdDisplayFields,
+        [Parameter(Mandatory=$false)]
+        [string]$FieldDelimiter=" | ", # ",","`t"
+        [Parameter(Mandatory=$true)]
+        [System.Collections.ArrayList]$answer
+    )
+    $eventDescriptions = @{1="Process Created";3="NetTraffic";8="ProcessInjected";11="FileCreated";12="RegKeyCreated/Deleted";13="RegKeyValueSet";14="RegKeyRenamed";15="StreamCreated";17="PipeCreated";
+        18="PipeConnected";22="DNSQuery";25="ProcessTampered"}
 
+    if(!$tree -or ($tree -eq $null) -or ($tree.count -eq 0)){return $answer}
+
+    foreach($item in $Tree.GetEnumerator()){
+        if($item -ne $null -and $item -ne "" -and $item.key -ne $null -and $item.key -ne ""){
+            
+            $GuidEvents = $records | where ProcessGuid -match $item.key
+            foreach($EIDF in ($EventIdDisplayFields.GetEnumerator() | Sort-Object -Property Key)){
+                $DisplayFields = $EIDF.Value
+                $id = $EIDF.Key
+                
+                $GuidIdEvents = $GuidEvents | where event_id -eq $id
+                $str = ""
+                $desc = ""
+                if($NoEventDescription){
+                    $desc = "event_id:$id"
+                }else{
+                    if($eventDescriptions.ContainsKey($id)){
+                        $desc = $eventDescriptions.$id
+                    }else{
+                        $desc = "event_id:$id"
+                    }                    
+                }
+                foreach($e in $GuidIdEvents){
+                    $thisStr = ""
+                    if($NoTimestamps){
+                        $thisStr += "$prefix$desc"
+                    }else{
+                        $thisStr = "$($e.eventTimestamp.ToString()) $prefix$desc$FieldDelimiter"
+                    }
+                    foreach($field in $DisplayFields){
+                        $thisStr += $e | Select-Object -ExpandProperty $field
+                        $thisStr += $FieldDelimiter
+                    }
+                    $thisStr = $thisStr.Substring(0,$thisStr.Length - 3)
+                    if($thisStr -and ($thisStr.Trim() -ne "")){[void]$answer.Add($thisStr);}
+                }
+
+            }
+        }
+        $answer = Print-ProcessTree -Tree $item.value -records $records -EventIdDisplayFields $EventIdDisplayFields -prefix $($prefix+"-") -NoTimestamps $NoTimestamps -NoEventDescription $NoEventDescription -answer $answer.Clone()
+        
+    }
+    return $answer
+}
+
+function Get-TreeArt{
+
+    $quotes = @("When people try to bury you, remind yourself you are a seed.",
+        "When life hands you dirt plant seeds.",
+        "A seed neither fears light nor darkness, but uses both to grow.",
+        "A seed refuses to die when you bury it, that is why it becomes a tree.",
+        "Throwing dirt on a seed only increases its value.",
+        "Be like seeds; do not see dirt thrown at you as your enemy, but as ground to grow.",
+        "Throwing dirt on a seed only increases its value.",
+        "When seeds want to rise they drop everything that is weighing them down.",
+        "Seeds only rise when you bury them.",
+        "Beautiful trees still rise from ugly seeds.",
+        "No matter how tall or wide a tree is, it started off a seed.",
+        "It is better to plant good seeds than to mourn bad weather.",
+        "There is a seed inside of every tree and a tree inside of every seed.",
+        "What you seed in your bad time, will be harvested in your good time",
+        "Truth is like a seed; no matter how deep you bury it, it will rise.",
+        "Even if I knew that tomorrow the world would go to pieces, I would still plant my apple tree.",
+        "Trees exhale for us so that we can inhale them to stay alive.",
+        "The creation of a thousand forests is in one acorn.",
+        "The best time to plant a tree was 20 years ago. The second best time is now.",
+        "Someone's sitting in the shade today because someone planted a tree a long time ago.",
+        "In a forest of a hundred thousand trees, no two leaves are alike. And no two journeys along the same path are alike.",
+        "The true meaning of life is to plant trees, under whose shade you do not expect to sit.",
+        "Until you dig a hole, you plant a tree, you water it and make it survive, you haven't done a thing. You are just talking.",
+        "If you would know strength and patience, welcome the company of trees.")
+
+    $tree1 = "IAAgACAAIAAgACAAIAAgACAAIAAgACAAIABfAHsAXAAgAF8AewBcAHsAXAAvAH0ALwB9AC8AfQBfAF8ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAB7AC8AewAvAFwAfQB7AC8AewAvAFwAfQAoAFwAfQB7AC8AXAB9ACAAXwAKACAAIAAgACAAIAAgACAAIAAgACAAIAB7AC8AewAvAFwAfQB7AC8AewAvAFwAfQAoAF8AKQBcAH0AewAvAHsALwBcAH0AIAAgAF8ACgAgACAAIAAgACAAIAAgACAAewBcAHsALwAoAFwAfQBcAH0AewAvAHsALwBcAH0AXAB9AHsALwApAHsALwBcAH0AXAB9ACAALwBcAH0ACgAgACAAIAAgACAAIAAgAHsALwB7AC8AKABfACkALwB9AHsAXAB7AC8AKQBcAH0AewBcACgAXwApAHsALwB9AC8AfQAvAH0ALwB9AAoAIAAgACAAIAAgACAAXwB7AFwAewAvAHsALwB7AFwAewAvAHsALwAoAF8AKQAvAH0ALwB9AC8AfQB7AFwAKAAvAH0ALwB9AC8AfQAKACAAIAAgACAAIAB7AC8AewAvAHsAXAB7AFwAewBcACgALwB9AHsAXAB7AFwALwB9AC8AfQB7AFwAfQAoAF8AKQB7AFwALwB9AFwAfQAKACAAIAAgACAAIABfAHsAXAB7AC8AewBcAHsALwAoAF8AKQBcAH0ALwB9AHsALwB7AC8AewAvAFwAfQBcAH0AKQBcAH0AewAvAFwAfQAKACAAIAAgACAAewAvAHsALwB7AFwAewBcACgALwB9AHsALwB7AFwAewBcAHsAXAAvAH0AKQAvAH0AewBcACgAXwApAC8AfQAvAH0AXAB9AAoAIAAgACAAIAAgAHsAXAB7AFwALwB9ACgAXwApAHsAXAB7AFwAewBcAC8AfQAvAH0AKABfACkAewBcAC8AfQB7AFwALwB9AC8AfQApAC8AfQAKACAAIAAgACAAIAAgAHsALwB7AFwAewBcAC8AfQB7AC8AewBcAHsAXAB7AFwALwB9AC8AfQB7AFwAewBcAC8AfQAvAH0AXAB9ACgAXwApAAoAIAAgACAAIAAgAHsALwB7AFwAewBcAC8AfQB7AC8AKQB7AFwAewBcAHsAXAAvAH0ALwB9AHsAXAB7AFwAKAAvAH0ALwB9AFwAfQAvAH0ACgAgACAAIAAgACAAIAB7AC8AewBcAHsAXAAvAH0AKABfACkAewBcAHsAXAB7AFwAKAAvAH0ALwB9AHsAXAAoAF8AKQAvAH0ALwB9AFwAfQAKACAAIAAgACAAIAAgACAAIAB7AC8AKAB7AC8AewBcAHsALwB7AFwAewBcAC8AfQAoAF8AKQB7AFwALwB9AC8AfQBcAH0ALwB9ACgAXAB9AAoAIAAgACAAIAAgACAAIAAgACAAKABfACkAewAvAHsAXAAvAH0AewBcAHsAXAAvAH0ALwB9AHsAXAB7AFwAKQAvAH0ALwB9ACgAXwApAAoAIAAgACAAIAAgACAAIAAgACAAIAAgAHsALwB7AC8AewBcAHsAXAAvAH0AewAvAHsAXAB7AFwAewBcACgAXwApAC8AfQAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgAHsALwB7AFwAewBcAHsAXAAvAH0ALwB9AHsAXAB7AFwAXAB9AC8AfQAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAewApAHsALwAgAHsAXAAvAH0AewBcAC8AfQAgAFwAfQBcAH0ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACgAXwApACAAIABcAC4ALQAnAC4ALQAvAAoAIAAgACAAIAAgACAAIAAgACAAXwBfAC4ALgAuAC0ALQAtACAAfAAnAC0ALgAtACcAfAAgAC0ALQAuAC4ALgBfAF8ACgAgACAAXwAuAC4ALgAtAC0AIgAgACAAIAAuAC0AJwAgACAAIAB8ACcALQAuAC0AJwB8ACAAIAAnACAALQAuACAAIAAiACIALQAtAC4ALgBfAF8ACgAtACIAIAAgACAAIAAnACAALgAgACAALgAgACcAIAAgACAAIAB8AC4AJwAtAC4AXwB8ACAAJwAgACAALgAgAC4AIAAgACcAIAAgACAACgAuACAAIAAnAC0AIAAgACcAIAAgACAAIAAuAC0ALQAnACAAIAB8ACAAJwAtAC4AJwB8ACAAIAAgACAALgAgACAAJwAgACAALgAgACcACgAgACAAIAAgACAAIAAgACAAIAAnACAALgAuACAAIAAgACAAIAB8ACcALQBfAC4ALQB8AAoAIAAuACAAIAAnACAAIAAuACAAIAAgACAAIAAgACAAXwAuAC0AfAAtAC4AXwAgAC0AfAAtAC4AXwAgACAALgAgACAAJwAgACAALgAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAALgAnACAAIAAgAHwAJwAtACAALgAtAHwAIAAgACAAJwAuAAoAIAAuAC4ALQAnACAAIAAgACcAIAAuACAAIAAnAC4AIAAgACAAYAAtAC4AXwAuAC0AtAAgACAAIAAuACcAIAAgACcAIAAgAC0AIAAuAAoAIAAgAC4ALQAnACAAJwAgACAAIAAgACAAIAAgACAAJwAtAC4AXwBfAF8AXwBfAF8AXwAuAC0AJwAgACAAIAAgACAAJwAgACAALgAKACAAIAAgACAAIAAgACAALgAgACAAIAAgACAAIAB+ACwACgAgACAAIAAuACAAIAAgACAAIAAgACAALgAgACAAIAB8AFwAIAAgACAALgAgACAAIAAgACcAIAAnAC0ALgAKAA=="
+    $tree2 = "IAAgACAAIAAgACAAIAAgACAAIAAgACAAIABfAHsAXAAgAF8AewBcAHsAXAAvAH0ALwB9AC8AfQBfAF8ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAB7AC8AewAvAFwAfQB7AC8AewAvAFwAfQAoAFwAfQB7AC8AXAB9ACAAXwAKACAAIAAgACAAIAAgACAAIAAgACAAIAB7AC8AewAvAFwAfQB7AC8AewAvAFwAfQAoAF8AKQBcAH0AewAvAHsALwBcAH0AIAAgAF8ACgAgACAAIAAgACAAIAAgACAAewBcAHsALwAoAFwAfQBcAH0AewAvAHsALwBcAH0AXAB9AHsALwApAHsALwBcAH0AXAB9ACAALwBcAH0ACgAgACAAIAAgACAAIAAgAHsALwB7AC8AKABfACkALwB9AHsAXAB7AC8AKQBcAH0AewBcACgAXwApAHsALwB9AC8AfQAvAH0ALwB9AAoAIAAgACAAIAAgACAAXwB7AFwAewAvAHsALwB7AFwAewAvAHsALwAoAF8AKQAvAH0ALwB9AC8AfQB7AFwAKAAvAH0ALwB9AC8AfQAKACAAIAAgACAAIAB7AC8AewAvAHsAXAB7AFwAewBcACgALwB9AHsAXAB7AFwALwB9AC8AfQB7AFwAfQAoAF8AKQB7AFwALwB9AFwAfQAKACAAIAAgACAAIABfAHsAXAB7AC8AewBcAHsALwAoAF8AKQBcAH0ALwB9AHsALwB7AC8AewAvAFwAfQBcAH0AKQBcAH0AewAvAFwAfQAKACAAIAAgACAAewAvAHsALwB7AFwAewBcACgALwB9AHsALwB7AFwAewBcAHsAXAAvAH0AKQAvAH0AewBcACgAXwApAC8AfQAvAH0AXAB9AAoAIAAgACAAIAAgAHsAXAB7AFwALwB9ACgAXwApAHsAXAB7AFwAewBcAC8AfQAvAH0AKABfACkAewBcAC8AfQB7AFwALwB9AC8AfQApAC8AfQAKACAAIAAgACAAIAAgAHsALwB7AFwAewBcAC8AfQB7AC8AewBcAHsAXAB7AFwALwB9AC8AfQB7AFwAewBcAC8AfQAvAH0AXAB9ACgAXwApAAoAIAAgACAAIAAgAHsALwB7AFwAewBcAC8AfQB7AC8AKQB7AFwAewBcAHsAXAAvAH0ALwB9AHsAXAB7AFwAKAAvAH0ALwB9AFwAfQAvAH0ACgAgACAAIAAgACAAIAB7AC8AewBcAHsAXAAvAH0AKABfACkAewBcAHsAXAB7AFwAKAAvAH0ALwB9AHsAXAAoAF8AKQAvAH0ALwB9AFwAfQAKACAAIAAgACAAIAAgACAAIAB7AC8AKAB7AC8AewBcAHsALwB7AFwAewBcAC8AfQAoAF8AKQB7AFwALwB9AC8AfQBcAH0ALwB9ACgAXAB9AAoAIAAgACAAIAAgACAAIAAgACAAKABfACkAewAvAHsAXAAvAH0AewBcAHsAXAAvAH0ALwB9AHsAXAB7AFwAKQAvAH0ALwB9ACgAXwApAAoAIAAgACAAIAAgACAAIAAgACAAIAAgAHsALwB7AC8AewBcAHsAXAAvAH0AewAvAHsAXAB7AFwAewBcACgAXwApAC8AfQAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgAHsALwB7AFwAewBcAHsAXAAvAH0ALwB9AHsAXAB7AFwAXAB9AC8AfQAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAewApAHsALwAgAHsAXAAvAH0AewBcAC8AfQAgAFwAfQBcAH0ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACgAXwApACAAIABcAC4ALQAnAC4ALQAvAAoAIAAgACAAIAAgACAAIAAgACAAXwBfAC4ALgAuAC0ALQAtACAAfAAnAC0ALgAtACcAfAAgAC0ALQAuAC4ALgBfAF8ACgAgACAAXwAuAC4ALgAtAC0AIgAgACAAIAAuAC0AJwAgACAAIAB8ACcALQAuAC0AJwB8ACAAIAAnACAALQAuACAAIAAiACIALQAtAC4ALgBfAF8ACgAtACIAIAAgACAAIAAnACAALgAgACAALgAgACcAIAAgACAAIAB8AC4AJwAtAC4AXwB8ACAAJwAgACAALgAgAC4AIAAgACcAIAAgACAACgAuACAAIAAnAC0AIAAgACcAIAAgACAAIAAuAC0ALQAnACAAIAB8ACAAJwAtAC4AJwB8ACAAIAAgACAALgAgACAAJwAgACAALgAgACcACgAgACAAIAAgACAAIAAgACAAIAAnACAALgAuACAAIAAgACAAIAB8ACcALQBfAC4ALQB8AAoAIAAuACAAIAAnACAAIAAuACAAIAAgACAAIAAgACAAXwAuAC0AfAAtAC4AXwAgAC0AfAAtAC4AXwAgACAALgAgACAAJwAgACAALgAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAALgAnACAAIAAgAHwAJwAtACAALgAtAHwAIAAgACAAJwAuAAoAIAAuAC4ALQAnACAAIAAgACcAIAAuACAAIAAnAC4AIAAgACAAYAAtAC4AXwAuAC0AtAAgACAAIAAuACcAIAAgACcAIAAgAC0AIAAuAAoAIAAgAC4ALQAnACAAJwAgACAAIAAgACAAIAAgACAAJwAtAC4AXwBfAF8AXwBfAF8AXwAuAC0AJwAgACAAIAAgACAAJwAgACAALgAKACAAIAAgACAAIAAgACAALgAgACAAIAAgACAAIAB+ACwACgAgACAAIAAuACAAIAAgACAAIAAgACAALgAgACAAIAB8AFwAIAAgACAALgAgACAAIAAgACcAIAAnAC0ALgAKAA=="
+    $tree3 = "IAAgACAAIAAgACAAIAAgAF8AXwAgAF8ALgAtAC0ALgAuAC0ALQAuAF8AIABfAAoAIAAgACAAIAAgAC4ALQAnACAAXwAvACAAIAAgAF8ALwBcAF8AIAAgACAAXABfACcALQAuAAoAIAAgACAAIAB8AF8AXwAgAC8AIAAgACAAXwAvAFwAXwBfAC8AXABfACAAIAAgAFwAXwBfAHwACgAgACAAIAAgACAAIAAgAHwAXwBfAF8ALwBcAF8AXABfAF8ALwAgACAAXABfAF8AXwB8AAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAFwAXwBfAC8ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAXABfAF8ALwAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAFwAXwBfAC8ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAFwAXwBfAC8ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAF8AXwBfAF8AXABfAF8ALwBfAF8AXwAKACAAIAAgACAAIAAgACAALgAgAC0AIAAnACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAJwAgAC0ALgAKACAAIAAgACAAIAAgAC8AIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIABcAAoAfgB+AH4AfgB+AH4AfgAgACAAfgB+AH4AfgB+ACAAfgB+AH4AfgB+ACAAIAB+AH4AfgAgAH4AfgB+ACAAIAB+AH4AfgB+AH4A"
+    $tree4 = "IAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAALABAAEAAQABAAEAAQABAACwACgAgACAAIAAgACAAIAAgACwALAAsAC4AIAAgACAALABAAEAAQABAAEAAQAAvAEAAQAAsACAAIAAuAG8AbwA4ADgAOAA4AG8ALgAKACAAIAAgACAALAAmACUAJQAmACUAJgAmACUALABAAEAAQABAAEAALwBAAEAAQABAAEAAQAAsADgAOAA4ADgAXAA4ADgALwA4AG8ACgAgACAAIAAsACUAJgBcACUAJgAmACUAJgAmACUALABAAEAAQABcAEAAQABAAC8AQABAAEAAOAA4AFwAOAA4ADgAOAA4AC8AOAA4ACcACgAgACAAIAAlACYAJgAlACYAJQAmAC8AJQAmACYAJQBAAEAAXABAAEAALwAgAC8AQABAAEAAOAA4ADgAOAA4AFwAOAA4ADgAOAA4ACcACgAgACAAIAAlACYAJgAlAC8AIAAlACYAJQAlACYAJgBAAEAAXAAgAFYAIAAvAEAAQAAnACAAYAA4ADgAXAA4ACAAYAAvADgAOAAnAAoAIAAgACAAYAAmACUAXAAgAGAAIAAvACUAJgAnACAAIAAgACAAfAAuAHwAIAAgACAAIAAgACAAIAAgAFwAIAAnAHwAOAAnAAoAIAAgACAAIAAgACAAIAB8AG8AfAAgACAAIAAgACAAIAAgACAAfAAgAHwAIAAgACAAIAAgACAAIAAgACAAfAAgAHwACgAgACAAIAAgACAAIAAgAHwALgB8ACAAIAAgACAAIAAgACAAIAB8ACAAfAAgACAAIAAgACAAIAAgACAAIAB8ACAAfAAKACAAIAAgACAAXABcAC8AIAAuAF8AXAAvAC8AXwAvAF8AXwAvACAAIAAsAFwAXwAvAC8AXwBfAFwAXAAvAC4AIAAgAFwAXwAvAC8AXwBfAC8AXwA="
+    $tree5 = "IAAgACAAIAAgACAAIAAgACMAIAAjACMAIwAjACAAIwAjACMAIwAKACAAIAAgACAAIAAgACMAIwAjACAAXAAvACMAfAAjACMAIwAgAHwALwAjACMAIwAjAAoAIAAgACAAIAAgACMAIwBcAC8AIwAvACAAXAB8AHwALwAjACMALwBfAC8AIwAjAC8AXwAjAAoAIAAgACAAIwAjACMAIAAgAFwALwAjACMAIwB8AC8AIABcAC8AIAAjACAAIwAjACMACgAgACMAIwBfAFwAXwAjAFwAXwBcACMAIwAgAHwAIAAjAC8AIwAjACMAXwAvAF8AIwAjACMAIwAKACMAIwAgACMAIwAjACMAIAAjACAAXAAgACMAfAAgAC8AIAAgACMAIwAjACMAIAAjACMALwAjACMACgAgAF8AXwAjAF8ALQAtACMAIwAjAGAAIAAgAHwAewAsACMAIwAjAC0ALQAtACMAIwAjAC0AfgAKACAAIAAgACAAIAAgACAAIAAgACAAIABcACAAfQB7AAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAfQB9AHsACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAB9AH0AewAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgAHsAewB9AAoAIAAgACAAIAAgACAALAAgAC0APQAtAH4AewAgAC4ALQBeAC0AIABfAA=="
+    $tree6 = "IAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAuAAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAC4AIAAgACAAIAAgACAAIAAgACAAOwAKACAAIAAgACAAIAAgAC4AIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAC4AIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgADsAJQAgACAAIAAgACAAOwA7AAoAIAAgACAAIAAgACAAIAAgACwAIAAgACAAIAAgACAAIAAgACAAIAAgACwAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAA6ADsAJQAgACAAJQA7AAoAIAAgACAAIAAgACAAIAAgACAAOgAgACAAIAAgACAAIAAgACAAIAA7ACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAOgA7ACUAOwAnACAAIAAgACAAIAAuACwACgAsAC4AIAAgACAAIAAgACAAIAAgACUAOwAgACAAIAAgACAAJQA7ACAAIAAgACAAIAAgACAAIAAgACAAIAAgADsAIAAgACAAIAAgACAAIAAgACUAOwAnACAAIAAgACAALAA7AAoAIAAgADsAIAAgACAAIAAgACAAIAA7ACUAOwAgACAAJQAlADsAIAAgACAAIAAgACAAIAAgACwAIAAgACAAIAAgACUAOwAgACAAIAAgADsAJQA7ACAAIAAgACAALAAlACcACgAgACAAIAAlADsAIAAgACAAIAAgACAAIAAlADsAJQA7ACAAIAAgACAAIAAgACwAIAAgADsAIAAgACAAIAAgACAAIAAlADsAIAAgADsAJQA7ACAAIAAgACwAJQA7ACcACgAgACAAIAAgADsAJQA7ACAAIAAgACAAIAAgACUAOwAgACAAIAAgACAAIAAgACAAOwAlADsAIAAgACAAIAAgACAAIAAgACUAIAA7ACUAOwAgACAALAAlADsAJwAKACAAIAAgACAAIABgACUAOwAuACAAIAAgACAAIAA7ACUAOwAgACAAIAAgACAAJQA7ACcAIAAgACAAIAAgACAAIAAgACAAYAA7ACUAJQA7AC4AJQA7ACcACgAgACAAIAAgACAAIABgADoAOwAlAC4AIAAgACAAIAA7ACUAJQAuACAAJQBAADsAIAAgACAAIAAgACAAIAAgACUAOwAgADsAQAAlADsAJQAnAAoAIAAgACAAIAAgACAAIAAgACAAYAA6ACUAOwAuACAAIAA6ADsAYgBkACUAOwAgACAAIAAgACAAIAAgACAAIAAgACUAOwBAACUAOwAnAAoAIAAgACAAIAAgACAAIAAgACAAIAAgAGAAQAAlADoALgAgACAAOgA7ACUALgAgACAAIAAgACAAIAAgACAAIAA7AEAAQAAlADsAJwAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAYABAACUALgAgACAAYAA7AEAAJQAuACAAIAAgACAAIAAgADsAQABAACUAOwAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAGAAQAAlACUALgAgAGAAQAAlACUAIAAgACAAIAA7AEAAQAAlADsACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAOwBAACUALgAgADoAQAAlACUAIAAgACUAQABAACUAOwAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAJQBAAGIAZAAlACUAJQBiAGQAJQAlADoAOwAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACMAQAAlACUAJQAlACUAOgA7ADsACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAlAEAAQAAlACUAJQA6ADoAOwAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACUAQABAAEAAJQAoAG8AKQA7ACAAIAAuACAAJwAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACUAQABAAEAAbwAlADsAOgAoAC4ALAAnAAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAGAALgAuACAAJQBAAEAAQABvACUAOgA6ADsACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAYAApAEAAQABAAG8AJQA6ADoAOwAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACUAQABAACgAbwApADoAOgA7AAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAC4AJQBAAEAAQABAACUAOgA6ADsACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAOwAlAEAAQABAAEAAJQA6ADoAOwAuAAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAA7ACUAQABAAEAAQAAlACUAOgA7ADsAOwAuAAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAALgAuAC4AOwAlAEAAQABAAEAAQAAlACUAOgA7ADsAOwA7ACwALgAuACAA"
+    $tree7 = "IAAgACwAZAAKACAAIAA4ADgACgBNAE0AOAA4AE0ATQBNACAAOABiACwAZABQAFAAWQBiAGEALAAgACAALABhAGQAUABQAFkAYgBhACwAIAAgACwAYQBkAFAAUABZAGIAYQAsAAoAIAAgADgAOAAgACAAIAAgADgAOABQACcAIAAgACAAIgBZADgAIABhADgAUABfAF8AXwBfAF8AOAA4ACAAYQA4AFAAXwBfAF8AXwBfADgAOAAKACAAIAA4ADgAIAAgACAAIAA4ADgAIAAgACAAIAAgACAAIAAgACAAOABQAFAAIgAiACIAIgAiACIAIgAgADgAUABQACIAIgAiACIAIgAiACIACgAgACAAOAA4ACwAIAAgACAAOAA4ACAAIAAgACAAIAAgACAAIAAgACIAOABiACwAIAAgACAALABhAGEAIAAiADgAYgAsACAAIAAgACwAYQBhAAoAIAAgACIAWQA4ADgAOAAgADgAOAAgACAAIAAgACAAIAAgACAAIAAgAGAAIgBZAGIAYgBkADgAIgAnACAAIABgACIAWQBiAGIAZAA4ACIAJwAKAA=="
+    $tree8 = "IAAgACAAIAAgACAAIAAsAC4ALAAKACAAIAAgACAAIAAgAE0ATQBNAE0AXwAgACAAIAAgACwALgAuACwACgAgACAAIAAgACAAIAAgACAAIgBfACAAIgBfAF8AIgBNAE0ATQBNAE0AIAAgACAAIAAgACAAIAAgACAAIAAsAC4ALgAuACwALAAKACAALAAuAC4ALgAsACAAXwBfAC4AIgAgAC0ALQAiACAAIAAgACAALAAuACwAIAAgACAAIAAgAF8ALQAiAE0ATQBNAE0ATQBNAE0ACgBNAE0ATQBNAE0ATQAiAF8AXwBfACAAIgBfAC4AXwAgACAAIABNAE0ATQAiAF8ALgAiACIAIABfACAAIgAiACIAIgAiACIACgAgACIAIgAiACIAIgAgACAAIAAgACIAIgAgACwAIABcAF8ALgAgACAAIAAiAF8ALgAgAC4AIgAKACAAIAAgACAAIAAgACAAIAAsAC4ALAAgAF8AIgBfAF8AIABcAF8AXwAuAC8AIAAuACIACgAgACAAIAAgACAAIAAgAE0ATQBNAE0ATQBfACIAIAAgACIAXwAgACAAIAAgAC4ALwAKACAAIAAgACAAIAAgACAAIAAnACcAJwAnACAAIAAgACAAIAAgACgAIAAgACAAIAApAAoAIAAuAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAC4ALQAnAF8AXwBfAF8AIgAtAC0ALQAuAF8ALgAKACAAIABcACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAvAAoAIAAgACAAXABfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwAvAA=="
+    $tree9 = "IAAgACAAIAAgACAAIAAsAC4ALAAKACAAIAAgACAAIAAgAE0ATQBNAE0AXwAgACAAIAAgACwALgAuACwACgAgACAAIAAgACAAIAAgACAAIgBfACAAIgBfAF8AIgBNAE0ATQBNAE0AIAAgACAAIAAgACAAIAAgACAAIAAsAC4ALgAuACwALAAKACAALAAuAC4ALgAsACAAXwBfAC4AIgAgAC0ALQAiACAAIAAgACAALAAuACwAIAAgACAAIAAgAF8ALQAiAE0ATQBNAE0ATQBNAE0ACgBNAE0ATQBNAE0ATQAiAF8AXwBfACAAIgBfAC4AXwAgACAAIABNAE0ATQAiAF8ALgAiACIAIABfACAAIgAiACIAIgAiACIACgAgACIAIgAiACIAIgAgACAAIAAgACIAIgAgACwAIABcAF8ALgAgACAAIAAiAF8ALgAgAC4AIgAKACAAIAAgACAAIAAgACAAIAAsAC4ALAAgAF8AIgBfAF8AIABcAF8AXwAuAC8AIAAuACIACgAgACAAIAAgACAAIAAgAE0ATQBNAE0ATQBfACIAIAAgACIAXwAgACAAIAAgAC4ALwAKACAAIAAgACAAIAAgACAAIAAnACcAJwAnACAAIAAgACAAIAAgACgAIAAgACAAIAApAAoAIAAuAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAC4ALQAnAF8AXwBfAF8AIgAtAC0ALQAuAF8ALgAKACAAIABcACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAvAAoAIAAgACAAXABfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwBfAF8AXwAvAA=="
+    $tree10 = "IAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACQAJAAkACQAJAAKACAAIAAkACQAJAAkACAAIAAgACAAIAAgACAAJAAkACQAIAAgACAAJAAkACQAJAAkAAoAIAAkACQAJAAkACQAJAAgACAAIAAgACAAJAAkACQAIAAgACAAJAAkACQAJAAkACQAJAAKACQAJAAkACAAJAAkACQAJAAgACAAIAAkACQAJAAgACAAJAAkACQAJAAgACAAIAAgACQACgAkACAAIAAgACAAJAAkACQAJAAgACQAJAAkACQAIAAkACQAJAAKACAAIAAgACAAIAAgACAAJAAkACQAJAAkACQAJAAkACQAJAAgACAAIAAkACQAJAAkACQACgAgACAAIAAgACQAJAAkACQAJAAkACQAJAAkACQAJAAkACAAJAAkACQAJAAgACQAJAAkACQAJAAKACAAIAAgACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAgACAAIAAgACAAJAAkACQACgAgACAAJAAkACQAIAAgACQAJAAkACQAJAAkACQAJAAkACQAJAAkACAAIAAgACAAIAAgACAAIAAkAAoAIAAkACQAIAAgACAAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkAAoAJAAkACAAIAAgACQAJAAkACQAIAAkACQAJAAgACQAJAAkACAAIAAkACQAJAAkACQACgAkACAAIAAgACQAJAAkACQAIAAgACAAJAAkACAAIAAkACQAJAAkACAAIAAgACQAJAAkAAoAIAAgACAAIAAkACQAJAAgACAAIAAgACAAJAAkACAAIAAgACQAJAAkACAAIAAgACAAJAAkAAoAIAAgACAAIAAkACQAIAAgACAAIAAgACAAJAAkACQAIAAgACAAJAAkACQAIAAgACAAIAAkAAoAIAAgACAAIAAkACQAIAAgACAAIAAgACAAIAAkACQAIAAgACAAIAAkACQAJAAKACAAIAAgACAAJAAgACAAIAAgACAAIAAgACAAJAAkACQAIAAgACAAIAAkACQACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACQAJAAkACAAIAAgACAAJAAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAJAAkACQACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACQAJAAkAAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAkACQAJAAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAJAAkACQACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAkACQAJAAKACAAIAAgACAAIAAgACAAIAAgACAAIAAkACQAJAAkAAoAIAAgACAAIAAgACAAIAAgACAAJAAkACQAJAAkAAoAIAAgACAAIAAgACAAJAAkACQAJAAkACQA"
+    $trees = @($tree1,$tree2,$tree3,$tree4,$tree5,$tree6,$tree7,$tree8,$tree9,$tree10)
+
+    $t = Get-Random -InputObject $trees
+    $q = Get-Random -InputObject $quotes
+
+    if($host.Name -eq 'ConsoleHost' -or $host.Name -notmatch "ISE"){
+        write-host -Debug -ForegroundColor Green $([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($t)))
+    }else{
+        write-host -Debug -ForegroundColor Green $([System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($t)))
+    }
+    write-host -Debug -ForegroundColor Green $q
+}
+
+function ConvertTo-Unicode{
+    param([string]$char)
+
+    #Regex that can be used to identify strings that have unicode characters where this function might be necessary
+    #$nonASCII = $str -match "[^\x00-\x7F]"
+    #sample usage
+    <#
+        $jsonquery | sls "[^\x00-\x7F]" -AllMatches | % Matches | %{
+            $jsonquery_unicode = $jsonquery_unicode -replace $_.Value,$(ConvertTo-Unicode -char $_.Value)
+        }
+    #>
+
+    $enc = [System.Text.Encoding]::UTF32.GetBytes($char)
+    $str = [System.String]::Format("{0:X}",($enc | select -First 1))
+    if($str.length -eq 1){$str += "0"}
+    return "\u00$str"
+}
+
+function Get-FieldCount($obj){
+    if($obj.GetType().name -notmatch "PSCustomObject"){
+        return 1
+    }else{
+        $count = 0;
+        foreach($subobj in ($obj.psobject.properties | ? MemberType -eq NoteProperty | ? TypeNameOfValue -Match "PSCustomObject")){
+            $count+=count_fields -obj $subobj.Value
+        };
+        foreach($field in ($obj.psobject.properties | ? MemberType -eq NoteProperty | ? TypeNameOfValue -NotMatch "PSCustomObject")){
+            $count++
+        };
+        return $count
+    } 
+}
